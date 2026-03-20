@@ -217,6 +217,12 @@ public class ChartServiceImpl implements ChartService {
                 chartValidator.validateBeforeDeployment(repositoryName, chartName, releaseName,
                         clusterId, namespace, cluster.getVersion(), testKubeconfigPath, repository);
 
+                // Dry-run 검증 수행
+                String dryRunCommand = helmCommandExecutor.buildHelmDryRunCommand(repository, chartName, releaseName,
+                        namespace, version, valuesFile, testKubeconfigPath);
+                String dryRunResult = helmCommandExecutor.executeHelmCommand(dryRunCommand, testKubeconfigPath);
+                log.info("Dry-run completed successfully for release: {}", releaseName);
+
             } finally {
                 deleteKubeconfigFile(testKubeconfigPath); // 테스트 후 즉시 삭제
             }

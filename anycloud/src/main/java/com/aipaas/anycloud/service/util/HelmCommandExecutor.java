@@ -248,6 +248,49 @@ public class HelmCommandExecutor {
     }
 
     /**
+     * Helm dry-run install 명령어를 빌드합니다.
+     */
+    public String buildHelmDryRunCommand(HelmRepoEntity repository, String chartName, String releaseName,
+            String namespace, String version, MultipartFile valuesFile, String kubeconfigPath) {
+        String repoAddCommand = buildHelmRepoAddCommand(repository);
+
+        StringBuilder command = new StringBuilder();
+        command.append(repoAddCommand).append(" && ");
+        command.append("helm install ")
+                .append(releaseName)
+                .append(" ")
+                .append(repository.getName())
+                .append("/")
+                .append(chartName);
+
+        command.append(" --kubeconfig ").append(kubeconfigPath);
+
+        if (namespace != null && !namespace.trim().isEmpty()) {
+            command.append(" --namespace ").append(namespace)
+                    .append(" --create-namespace");
+        }
+
+        if (version != null && !version.trim().isEmpty()) {
+            command.append(" --version ").append(version);
+        }
+
+        if (valuesFile != null && !valuesFile.isEmpty() && valuesFile.getSize() > 0) {
+            try {
+                String tempValuesPath = saveValuesFile(valuesFile);
+                command.append(" --values ").append(tempValuesPath);
+            } catch (IOException e) {
+                log.error("Failed to save values file for dry-run", e);
+                throw new HelmDeploymentException("Failed to process values file: " + e.getMessage());
+            }
+        }
+
+        command.append(" --dry-run --debug");
+        command.append(" --insecure-skip-tls-verify");
+
+        return command.toString();
+    }
+
+    /**
      * Helm status 명령어를 빌드합니다.
      */
     public String buildHelmStatusCommand(String releaseName, String namespace, String kubeconfigPath) {
