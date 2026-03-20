@@ -197,10 +197,14 @@ public class MonitServiceImpl implements MonitService {
 				if (node.has("value") && node.get("value").size() > 1) {
 					gpuUtil = node.get("value").get(1).asDouble(0.0);
 				}
+				String description = metric.has("description") ? metric.get("description").asText() : "";
+				String status = description.contains("complete") ? "deployed" :
+								description.contains("failed") ? "failed" : description;
 				releases.add(ReleaseStatusDto.builder()
-						.name(metric.has("name") ? metric.get("name").asText() : "")
+						.name(metric.has("release") ? metric.get("release").asText() :
+								(metric.has("name") ? metric.get("name").asText() : ""))
 						.namespace(metric.has("namespace") ? metric.get("namespace").asText() : "")
-						.status(metric.has("status") ? metric.get("status").asText() : "")
+						.status(status)
 						.chart(metric.has("chart") ? metric.get("chart").asText() : "")
 						.chartVersion(metric.has("version") ? metric.get("version").asText() : "")
 						.updated(metric.has("updated") ? metric.get("updated").asText() : "")
