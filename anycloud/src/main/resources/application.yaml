@@ -192,10 +192,12 @@ prometheus:
           (kube_pod_status_phase{phase!="Pending", job="kube-state-metrics"} == 1)
       request: "sum by(node) (kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\",${NODE_FILTER},${NAMESPACE_FILTER} })"
       limit: "sum by(node) (kube_pod_container_resource_limits{resource=\"nvidia_com_gpu\",${NODE_FILTER},${NAMESPACE_FILTER} })"
-      util: "DCGM_FI_DEV_GPU_UTIL"
-      memory_copy_util: "DCGM_FI_DEV_MEM_COPY_UTIL"
-      memory_used: "DCGM_FI_DEV_FB_USED"
-      xid_errors: "DCGM_FI_DEV_XID_ERRORS"
+      util: "nvidia_smi_utilization_gpu_ratio * 100"
+      memory_copy_util: "nvidia_smi_utilization_memory_ratio * 100"
+      memory_used: "nvidia_smi_memory_used_bytes / 1048576"
+      memory_total: "nvidia_smi_memory_total_bytes / 1048576"
+      temperature: "nvidia_smi_temperature_gpu"
+      power_draw: "nvidia_smi_power_draw_watts"
     pod:
       total: "sum(kube_node_status_capacity{resource=\"pods\", ${NODE_FILTER} })"
       used_node: "kubelet_running_pods{${NODE_FILTER}}"
@@ -230,18 +232,18 @@ prometheus:
       ephemeral_storage_usage: "gke_tpu_node_usage{resource_type=\"ephemeral_storage\"}, ${NODE_FILTER}}"
       capacity_total: "gke_tpu_node_capacity{${NODE_FILTER}}"
     monitoring:
-      helm_releases: "count(helm_release_info) or vector(0)"
-      gpu_count: "count(DCGM_FI_DEV_GPU_UTIL) or vector(0)"
-      gpu_avg_util: "avg(DCGM_FI_DEV_GPU_UTIL) or vector(0)"
+      helm_releases: "count(helm_release_status) or vector(0)"
+      gpu_count: "count(nvidia_smi_gpu_info) or vector(0)"
+      gpu_avg_util: "avg(nvidia_smi_utilization_gpu_ratio) * 100 or vector(0)"
       active_alerts: "count(ALERTS{alertstate=\"firing\"}) or vector(0)"
       release_status: |
-        helm_release_info * on() group_left() (avg(DCGM_FI_DEV_GPU_UTIL) or vector(0))
+        helm_release_status
     cost:
       gpu_usage_by_ns: |
-        sum by (namespace) (DCGM_FI_DEV_GPU_UTIL) or vector(0)
+        sum by (namespace) (nvidia_smi_utilization_gpu_ratio * 100) or vector(0)
       gpu_count_by_ns: |
-        count by (namespace) (DCGM_FI_DEV_GPU_UTIL) or vector(0)
+        count by (namespace) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"}) or vector(0)
       gpu_util_range: |
-        avg by (namespace) (DCGM_FI_DEV_GPU_UTIL)
+        avg by (namespace) (nvidia_smi_utilization_gpu_ratio * 100)
 
       
