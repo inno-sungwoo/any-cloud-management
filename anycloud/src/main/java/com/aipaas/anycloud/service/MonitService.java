@@ -19,10 +19,9 @@ public interface MonitService {
 
 	List<MonitEntity.NodeStatus> nodeStatus(String clusterName);
 	Object resourceMonit (String clusterName, String type, String key, Map<String, String> filter);
-	//Object executeQuery(String url, String query);
 
-//	String getMonitUrl(String ClusterName);
-//	MonitEntity realTimeMonit(String ClusterName, Map<String, String> filter);
-	// MonitEntity clusterQuery(String ClusterName);
+	Object monitoringSummary(String clusterName);
+	Object monitoringReleases(String clusterName);
+	Object monitoringAlerts(String clusterName);
 
 }

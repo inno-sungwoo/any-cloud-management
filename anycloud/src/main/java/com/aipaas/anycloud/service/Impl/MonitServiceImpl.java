@@ -1,6 +1,9 @@
 package com.aipaas.anycloud.service.Impl;
 
 import com.aipaas.anycloud.error.exception.EntityNotFoundException;
+import com.aipaas.anycloud.model.dto.response.AlertDto;
+import com.aipaas.anycloud.model.dto.response.MonitoringSummaryDto;
+import com.aipaas.anycloud.model.dto.response.ReleaseStatusDto;
 import com.aipaas.anycloud.model.entity.ClusterEntity;
 import com.aipaas.anycloud.model.entity.MonitEntity;
 import com.aipaas.anycloud.repository.ClusterRepository;
@@ -158,13 +161,129 @@ public class MonitServiceImpl implements MonitService {
 		}
 	}
 
+	@Override
+	public Object monitoringSummary(String clusterName) {
+		String monitUrl = getMonitUrl(clusterName);
+
+		String helmReleasesQuery = prometheusQueryService.resolve("monitoring", "helm_releases", null);
+		String gpuCountQuery = prometheusQueryService.resolve("monitoring", "gpu_count", null);
+		String gpuAvgUtilQuery = prometheusQueryService.resolve("monitoring", "gpu_avg_util", null);
+		String activeAlertsQuery = prometheusQueryService.resolve("monitoring", "active_alerts", null);
+
+		int helmReleaseCount = extractScalarInt(executeQueryRaw(monitUrl, "query", helmReleasesQuery, null));
+		int gpuCount = extractScalarInt(executeQueryRaw(monitUrl, "query", gpuCountQuery, null));
+		double avgGpuUtil = extractScalarDouble(executeQueryRaw(monitUrl, "query", gpuAvgUtilQuery, null));
+		int activeAlertCount = extractScalarInt(executeQueryRaw(monitUrl, "query", activeAlertsQuery, null));
+
+		return MonitoringSummaryDto.builder()
+				.helmReleaseCount(helmReleaseCount)
+				.gpuCount(gpuCount)
+				.avgGpuUtil(avgGpuUtil)
+				.activeAlertCount(activeAlertCount)
+				.build();
+	}
+
+	@Override
+	public Object monitoringReleases(String clusterName) {
+		String monitUrl = getMonitUrl(clusterName);
+		String releaseQuery = prometheusQueryService.resolve("monitoring", "release_status", null);
+		JsonNode result = executeQueryRaw(monitUrl, "query", releaseQuery, null);
+
+		List<ReleaseStatusDto> releases = new ArrayList<>();
+		if (result.isArray()) {
+			for (JsonNode node : result) {
+				JsonNode metric = node.get("metric");
+				double gpuUtil = 0.0;
+				if (node.has("value") && node.get("value").size() > 1) {
+					gpuUtil = node.get("value").get(1).asDouble(0.0);
+				}
+				releases.add(ReleaseStatusDto.builder()
+						.name(metric.has("name") ? metric.get("name").asText() : "")
+						.namespace(metric.has("namespace") ? metric.get("namespace").asText() : "")
+						.status(metric.has("status") ? metric.get("status").asText() : "")
+						.chart(metric.has("chart") ? metric.get("chart").asText() : "")
+						.chartVersion(metric.has("version") ? metric.get("version").asText() : "")
+						.updated(metric.has("updated") ? metric.get("updated").asText() : "")
+						.gpuUtil(gpuUtil)
+						.build());
+			}
+		}
+		return releases;
+	}
+
+	@Override
+	public Object monitoringAlerts(String clusterName) {
+		String monitUrl = getMonitUrl(clusterName);
+		try {
+			URI alertUri = UriComponentsBuilder.fromHttpUrl(monitUrl)
+					.replacePath("/api/v2/alerts")
+					.queryParam("active", "true")
+					.build()
+					.toUri();
+
+			String responseBody = webClient.get()
+					.uri(alertUri)
+					.retrieve()
+					.bodyToMono(String.class)
+					.block();
+
+			JsonNode alertsArray = objectMapper.readTree(responseBody);
+			List<AlertDto> alerts = new ArrayList<>();
+
+			if (alertsArray.isArray()) {
+				for (JsonNode alertNode : alertsArray) {
+					JsonNode labels = alertNode.path("labels");
+					JsonNode annotations = alertNode.path("annotations");
+					JsonNode status = alertNode.path("status");
+
+					alerts.add(AlertDto.builder()
+							.alertName(labels.path("alertname").asText(""))
+							.severity(labels.path("severity").asText(""))
+							.namespace(labels.path("namespace").asText(""))
+							.message(annotations.path("description").asText(
+									annotations.path("message").asText("")))
+							.startsAt(alertNode.path("startsAt").asText(""))
+							.status(status.path("state").asText(
+									alertNode.path("state").asText("")))
+							.build());
+				}
+			}
+			return alerts;
+		} catch (Exception e) {
+			log.error("Failed to fetch alerts from AlertManager: {}", e.getMessage(), e);
+			return new ArrayList<AlertDto>();
+		}
+	}
+
+	private int extractScalarInt(JsonNode result) {
+		try {
+			if (result.isArray() && result.size() > 0) {
+				return (int) result.get(0).get("value").get(1).asDouble(0);
+			}
+		} catch (Exception e) {
+			log.warn("Failed to extract scalar int from result: {}", e.getMessage());
+		}
+		return 0;
+	}
+
+	private double extractScalarDouble(JsonNode result) {
+		try {
+			if (result.isArray() && result.size() > 0) {
+				return result.get(0).get("value").get(1).asDouble(0.0);
+			}
+		} catch (Exception e) {
+			log.warn("Failed to extract scalar double from result: {}", e.getMessage());
+		}
+		return 0.0;
+	}
+
 	private JsonNode executeQueryRaw(String monitUrl, String metricType, String query,
 			Map<String, Long> timeQueryParams) {
 		try {
 			String encodedQuery = UriUtils.encode(query, StandardCharsets.UTF_8);
 
-			log.error("query : {} ", query);
-			log.error("encodedQuery : {} ", encodedQuery);
+			log.debug("query : {} ", query);
+			log.debug("encodedQuery : {} ", encodedQuery);
 			UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(monitUrl)
 					.path("/api/v1/" + metricType)
 					.queryParam("query", encodedQuery);
@@ -189,7 +308,7 @@ public class MonitServiceImpl implements MonitService {
 					.block();
 
 			JsonNode rootNode = objectMapper.readTree(responseBody);
-			log.error("responseBody : {} ", responseBody);
+			log.debug("responseBody : {} ", responseBody);
 			JsonNode resultArray = rootNode.path("data").path("result");
 
 			// if (resultArray.isArray() && resultArray.size() > 0) {

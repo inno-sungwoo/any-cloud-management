@@ -229,5 +229,19 @@ prometheus:
       tpu_usage: "gke_tpu_node_usage{resource_type=\"tpu\", ${NODE_FILTER}}"
       ephemeral_storage_usage: "gke_tpu_node_usage{resource_type=\"ephemeral_storage\"}, ${NODE_FILTER}}"
       capacity_total: "gke_tpu_node_capacity{${NODE_FILTER}}"
+    monitoring:
+      helm_releases: "count(helm_release_info) or vector(0)"
+      gpu_count: "count(DCGM_FI_DEV_GPU_UTIL) or vector(0)"
+      gpu_avg_util: "avg(DCGM_FI_DEV_GPU_UTIL) or vector(0)"
+      active_alerts: "count(ALERTS{alertstate=\"firing\"}) or vector(0)"
+      release_status: |
+        helm_release_info * on() group_left() (avg(DCGM_FI_DEV_GPU_UTIL) or vector(0))
+    cost:
+      gpu_usage_by_ns: |
+        sum by (namespace) (DCGM_FI_DEV_GPU_UTIL) or vector(0)
+      gpu_count_by_ns: |
+        count by (namespace) (DCGM_FI_DEV_GPU_UTIL) or vector(0)
+      gpu_util_range: |
+        avg by (namespace) (DCGM_FI_DEV_GPU_UTIL)
 
       
