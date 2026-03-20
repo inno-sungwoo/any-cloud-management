@@ -23,5 +23,6 @@ public interface MonitService {
 	Object monitoringSummary(String clusterName);
 	Object monitoringReleases(String clusterName);
 	Object monitoringAlerts(String clusterName);
+	Object monitoringGpuStatus(String clusterName);
 
 }

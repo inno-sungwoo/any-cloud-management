@@ -191,25 +191,56 @@ public class MonitServiceImpl implements MonitService {
 		String releaseQuery = prometheusQueryService.resolve("monitoring", "release_status", null);
 		JsonNode releaseResult = executeQueryRaw(monitUrl, "query", releaseQuery, null);
 
-		// 2. GPU 메트릭 조회 (nvidia-smi)
-		double gpuUtil = extractScalarDouble(executeQueryRaw(monitUrl, "query",
-				"nvidia_smi_utilization_gpu_ratio * 100", null));
-		double gpuTemp = extractScalarDouble(executeQueryRaw(monitUrl, "query",
-				"nvidia_smi_temperature_gpu", null));
-		double gpuPower = extractScalarDouble(executeQueryRaw(monitUrl, "query",
-				"nvidia_smi_power_draw_watts", null));
-		double vramUsed = extractScalarDouble(executeQueryRaw(monitUrl, "query",
-				"nvidia_smi_memory_used_bytes / 1048576", null));
-		double vramTotal = extractScalarDouble(executeQueryRaw(monitUrl, "query",
-				"nvidia_smi_memory_total_bytes / 1048576", null));
-		String gpuName = "";
-		JsonNode gpuInfoResult = executeQueryRaw(monitUrl, "query", "nvidia_smi_gpu_info", null);
-		if (gpuInfoResult.isArray() && gpuInfoResult.size() > 0) {
-			JsonNode gpuMetric = gpuInfoResult.get(0).get("metric");
-			gpuName = gpuMetric.has("name") ? gpuMetric.get("name").asText() : "";
+		// 2. GPU 요청 Pod 조회 (어떤 릴리즈가 GPU를 쓰는지)
+		// kube_pod_container_resource_requests{resource="nvidia_com_gpu"} → namespace, pod 라벨
+		JsonNode gpuPodResult = executeQueryRaw(monitUrl, "query",
+				"kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"}", null);
+		Set<String> gpuNamespaces = new HashSet<>();
+		if (gpuPodResult.isArray()) {
+			for (JsonNode node : gpuPodResult) {
+				String ns = node.path("metric").path("namespace").asText("");
+				if (!ns.isEmpty()) gpuNamespaces.add(ns);
+			}
 		}
 
-		// 3. 릴리즈 목록 파싱 + GPU 데이터 합침
+		// 3. GPU 메트릭 조회 (UUID별 — 멀티 GPU 대응)
+		// nvidia_smi_* 메트릭은 uuid 라벨로 GPU별 구분
+		Map<String, Map<String, Object>> gpuDataByUuid = new HashMap<>();
+		JsonNode gpuInfoResult = executeQueryRaw(monitUrl, "query", "nvidia_smi_gpu_info", null);
+		if (gpuInfoResult.isArray()) {
+			for (JsonNode node : gpuInfoResult) {
+				JsonNode m = node.get("metric");
+				String uuid = m.path("uuid").asText("");
+				if (!uuid.isEmpty()) {
+					Map<String, Object> data = new HashMap<>();
+					data.put("name", m.path("name").asText(""));
+					gpuDataByUuid.put(uuid, data);
+				}
+			}
+		}
+		// 각 GPU UUID별 메트릭 수집
+		for (String metricQuery : new String[]{
+				"nvidia_smi_utilization_gpu_ratio * 100",
+				"nvidia_smi_temperature_gpu",
+				"nvidia_smi_power_draw_watts",
+				"nvidia_smi_memory_used_bytes / 1048576",
+				"nvidia_smi_memory_total_bytes / 1048576"}) {
+			JsonNode metricResult = executeQueryRaw(monitUrl, "query", metricQuery, null);
+			if (metricResult.isArray()) {
+				for (JsonNode node : metricResult) {
+					String uuid = node.path("metric").path("uuid").asText("");
+					double value = node.path("value").get(1).asDouble(0.0);
+					Map<String, Object> data = gpuDataByUuid.computeIfAbsent(uuid, k -> new HashMap<>());
+					if (metricQuery.contains("utilization_gpu")) data.put("util", value);
+					else if (metricQuery.contains("temperature")) data.put("temp", value);
+					else if (metricQuery.contains("power_draw")) data.put("power", value);
+					else if (metricQuery.contains("memory_used")) data.put("vramUsed", value);
+					else if (metricQuery.contains("memory_total")) data.put("vramTotal", value);
+				}
+			}
+		}
+
+		// 4. 릴리즈 목록 파싱
 		List<ReleaseStatusDto> releases = new ArrayList<>();
 		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 				.withZone(ZoneId.of("Asia/Seoul"));
@@ -217,34 +248,44 @@ public class MonitServiceImpl implements MonitService {
 		if (releaseResult.isArray()) {
 			for (JsonNode node : releaseResult) {
 				JsonNode metric = node.get("metric");
+				String releaseName = metric.has("release") ? metric.get("release").asText() :
+						(metric.has("name") ? metric.get("name").asText() : "");
+				String namespace = metric.has("namespace") ? metric.get("namespace").asText() : "";
 				String description = metric.has("description") ? metric.get("description").asText() : "";
 				String status = description.contains("complete") ? "deployed" :
 								description.contains("failed") ? "failed" : description;
 
-				// updated 타임스탬프 변환 (밀리초 → 날짜)
+				// updated 타임스탬프 변환
 				String updatedRaw = metric.has("updated") ? metric.get("updated").asText() : "";
 				String updatedFormatted = updatedRaw;
 				try {
 					long ts = Long.parseLong(updatedRaw);
-					if (ts > 1000000000000L) ts = ts / 1000; // 밀리초면 초로 변환
+					if (ts > 1000000000000L) ts = ts / 1000;
 					updatedFormatted = formatter.format(Instant.ofEpochSecond(ts));
 				} catch (NumberFormatException ignored) {}
 
-				releases.add(ReleaseStatusDto.builder()
-						.name(metric.has("release") ? metric.get("release").asText() :
-								(metric.has("name") ? metric.get("name").asText() : ""))
-						.namespace(metric.has("namespace") ? metric.get("namespace").asText() : "")
+				// GPU 데이터: 해당 릴리즈의 namespace가 GPU를 사용하는 경우만 표시
+				ReleaseStatusDto.ReleaseStatusDtoBuilder builder = ReleaseStatusDto.builder()
+						.name(releaseName)
+						.namespace(namespace)
 						.status(status)
 						.chart(metric.has("chart") ? metric.get("chart").asText() : "")
 						.chartVersion(metric.has("version") ? metric.get("version").asText() : "")
-						.updated(updatedFormatted)
-						.gpuUtil(gpuUtil)
-						.gpuName(gpuName)
-						.gpuTemp(gpuTemp)
-						.gpuPowerWatt(gpuPower)
-						.vramUsedMb(vramUsed)
-						.vramTotalMb(vramTotal)
-						.build());
+						.updated(updatedFormatted);
+
+				if (gpuNamespaces.contains(namespace) && !gpuDataByUuid.isEmpty()) {
+					// 이 릴리즈가 GPU를 사용하는 namespace에 있으면 GPU 데이터 표시
+					Map<String, Object> gpu = gpuDataByUuid.values().iterator().next();
+					builder.gpuUtil((Double) gpu.getOrDefault("util", null))
+							.gpuName((String) gpu.getOrDefault("name", null))
+							.gpuTemp((Double) gpu.getOrDefault("temp", null))
+							.gpuPowerWatt((Double) gpu.getOrDefault("power", null))
+							.vramUsedMb((Double) gpu.getOrDefault("vramUsed", null))
+							.vramTotalMb((Double) gpu.getOrDefault("vramTotal", null));
+				}
+				// GPU를 사용하지 않는 릴리즈는 null (프론트에서 "-" 표시)
+
+				releases.add(builder.build());
 			}
 		}
 		return releases;
@@ -292,6 +333,64 @@ public class MonitServiceImpl implements MonitService {
 			log.error("Failed to fetch alerts from AlertManager: {}", e.getMessage(), e);
 			return new ArrayList<AlertDto>();
 		}
+	}
+
+	@Override
+	public Object monitoringGpuStatus(String clusterName) {
+		String monitUrl = getMonitUrl(clusterName);
+
+		// GPU 카드별 정보 수집 (UUID 기준)
+		List<Map<String, Object>> gpuList = new ArrayList<>();
+		JsonNode gpuInfoResult = executeQueryRaw(monitUrl, "query", "nvidia_smi_gpu_info", null);
+		if (gpuInfoResult.isArray()) {
+			for (JsonNode node : gpuInfoResult) {
+				JsonNode m = node.get("metric");
+				String uuid = m.path("uuid").asText("");
+				Map<String, Object> gpu = new LinkedHashMap<>();
+				gpu.put("uuid", uuid);
+				gpu.put("name", m.path("name").asText(""));
+				gpu.put("driverVersion", m.path("driver_version").asText(""));
+				gpuList.add(gpu);
+			}
+		}
+
+		// 각 GPU UUID별 실시간 메트릭 수집
+		Map<String, String> metricQueries = new LinkedHashMap<>();
+		metricQueries.put("utilization", "nvidia_smi_utilization_gpu_ratio * 100");
+		metricQueries.put("memoryUtilization", "nvidia_smi_utilization_memory_ratio * 100");
+		metricQueries.put("temperature", "nvidia_smi_temperature_gpu");
+		metricQueries.put("powerDraw", "nvidia_smi_power_draw_watts");
+		metricQueries.put("vramUsedMb", "nvidia_smi_memory_used_bytes / 1048576");
+		metricQueries.put("vramTotalMb", "nvidia_smi_memory_total_bytes / 1048576");
+		metricQueries.put("fanSpeed", "nvidia_smi_fan_speed_ratio * 100");
+
+		Map<String, Map<String, Double>> metricsByUuid = new HashMap<>();
+		for (Map.Entry<String, String> entry : metricQueries.entrySet()) {
+			JsonNode metricResult = executeQueryRaw(monitUrl, "query", entry.getValue(), null);
+			if (metricResult.isArray()) {
+				for (JsonNode node : metricResult) {
+					String uuid = node.path("metric").path("uuid").asText("");
+					double value = node.path("value").get(1).asDouble(0.0);
+					metricsByUuid.computeIfAbsent(uuid, k -> new HashMap<>())
+							.put(entry.getKey(), value);
+				}
+			}
+		}
+
+		// GPU 정보 + 메트릭 합침
+		for (Map<String, Object> gpu : gpuList) {
+			String uuid = (String) gpu.get("uuid");
+			Map<String, Double> metrics = metricsByUuid.getOrDefault(uuid, new HashMap<>());
+			gpu.put("utilization", metrics.getOrDefault("utilization", 0.0));
+			gpu.put("memoryUtilization", metrics.getOrDefault("memoryUtilization", 0.0));
+			gpu.put("temperature", metrics.getOrDefault("temperature", 0.0));
+			gpu.put("powerDraw", metrics.getOrDefault("powerDraw", 0.0));
+			gpu.put("vramUsedMb", metrics.getOrDefault("vramUsedMb", 0.0));
+			gpu.put("vramTotalMb", metrics.getOrDefault("vramTotalMb", 0.0));
+			gpu.put("fanSpeed", metrics.getOrDefault("fanSpeed", 0.0));
+		}
+
+		return gpuList;
 	}
 
 	private int extractScalarInt(JsonNode result) {

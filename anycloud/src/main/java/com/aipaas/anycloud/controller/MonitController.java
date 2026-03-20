@@ -104,6 +104,22 @@ public class MonitController {
 		return new ResponseEntity<>(monitService.monitoringAlerts(clusterName), new HttpHeaders(), HttpStatus.OK);
 	}
 
+	@GetMapping("/monitoring/gpu-status")
+	@Operation(
+		summary = "GPU 현황 조회",
+		description = "클러스터 내 GPU 카드별 실시간 상태 조회 (UUID별)"
+	)
+	@ApiResponses(value = {
+		@ApiResponse(responseCode = "200", description = "GPU 현황 조회 성공"),
+		@ApiResponse(responseCode = "500", description = "서버 오류")
+	})
+	public ResponseEntity<Object> monitoringGpuStatus(
+		@Parameter(description = "클러스터 이름", required = true, example = "innogrid-aikube")
+		@RequestParam("cluster") String clusterName) {
+		log.info("retrieve GPU status for cluster: {}", clusterName);
+		return new ResponseEntity<>(monitService.monitoringGpuStatus(clusterName), new HttpHeaders(), HttpStatus.OK);
+	}
+
 	@GetMapping("/resourceMonit/{cluster}/{type}/{key}")
 	@Operation(
 		summary = "모니터링 메트릭 조회",
