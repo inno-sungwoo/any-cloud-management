@@ -7,8 +7,10 @@ import com.aipaas.anycloud.model.dto.response.ChartReleasesResponseDto;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactoryBuilder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.yaml.snakeyaml.LoaderOptions;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28,8 +30,18 @@ import java.util.stream.StreamSupport;
 @Component
 public class ChartParser {
 
-    private final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+    private final ObjectMapper yamlMapper;
     private final ObjectMapper jsonMapper = new ObjectMapper();
+
+    public ChartParser() {
+        // SnakeYAML 파싱 제한을 128MB로 확장 (대형 Helm 저장소 index.yaml 대응)
+        LoaderOptions loaderOptions = new LoaderOptions();
+        loaderOptions.setCodePointLimit(128 * 1024 * 1024);
+        YAMLFactory yamlFactory = YAMLFactory.builder()
+                .loaderOptions(loaderOptions)
+                .build();
+        this.yamlMapper = new ObjectMapper(yamlFactory);
+    }
 
     /**
      * index.yaml 내용을 파싱하여 차트 목록을 생성합니다.
