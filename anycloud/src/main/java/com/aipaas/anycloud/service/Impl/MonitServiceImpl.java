@@ -186,20 +186,50 @@ public class MonitServiceImpl implements MonitService {
 	@Override
 	public Object monitoringReleases(String clusterName) {
 		String monitUrl = getMonitUrl(clusterName);
-		String releaseQuery = prometheusQueryService.resolve("monitoring", "release_status", null);
-		JsonNode result = executeQueryRaw(monitUrl, "query", releaseQuery, null);
 
+		// 1. Helm 릴리즈 목록 조회
+		String releaseQuery = prometheusQueryService.resolve("monitoring", "release_status", null);
+		JsonNode releaseResult = executeQueryRaw(monitUrl, "query", releaseQuery, null);
+
+		// 2. GPU 메트릭 조회 (nvidia-smi)
+		double gpuUtil = extractScalarDouble(executeQueryRaw(monitUrl, "query",
+				"nvidia_smi_utilization_gpu_ratio * 100", null));
+		double gpuTemp = extractScalarDouble(executeQueryRaw(monitUrl, "query",
+				"nvidia_smi_temperature_gpu", null));
+		double gpuPower = extractScalarDouble(executeQueryRaw(monitUrl, "query",
+				"nvidia_smi_power_draw_watts", null));
+		double vramUsed = extractScalarDouble(executeQueryRaw(monitUrl, "query",
+				"nvidia_smi_memory_used_bytes / 1048576", null));
+		double vramTotal = extractScalarDouble(executeQueryRaw(monitUrl, "query",
+				"nvidia_smi_memory_total_bytes / 1048576", null));
+		String gpuName = "";
+		JsonNode gpuInfoResult = executeQueryRaw(monitUrl, "query", "nvidia_smi_gpu_info", null);
+		if (gpuInfoResult.isArray() && gpuInfoResult.size() > 0) {
+			JsonNode gpuMetric = gpuInfoResult.get(0).get("metric");
+			gpuName = gpuMetric.has("name") ? gpuMetric.get("name").asText() : "";
+		}
+
+		// 3. 릴리즈 목록 파싱 + GPU 데이터 합침
 		List<ReleaseStatusDto> releases = new ArrayList<>();
-		if (result.isArray()) {
-			for (JsonNode node : result) {
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+				.withZone(ZoneId.of("Asia/Seoul"));
+
+		if (releaseResult.isArray()) {
+			for (JsonNode node : releaseResult) {
 				JsonNode metric = node.get("metric");
-				double gpuUtil = 0.0;
-				if (node.has("value") && node.get("value").size() > 1) {
-					gpuUtil = node.get("value").get(1).asDouble(0.0);
-				}
 				String description = metric.has("description") ? metric.get("description").asText() : "";
 				String status = description.contains("complete") ? "deployed" :
 								description.contains("failed") ? "failed" : description;
+
+				// updated 타임스탬프 변환 (밀리초 → 날짜)
+				String updatedRaw = metric.has("updated") ? metric.get("updated").asText() : "";
+				String updatedFormatted = updatedRaw;
+				try {
+					long ts = Long.parseLong(updatedRaw);
+					if (ts > 1000000000000L) ts = ts / 1000; // 밀리초면 초로 변환
+					updatedFormatted = formatter.format(Instant.ofEpochSecond(ts));
+				} catch (NumberFormatException ignored) {}
+
 				releases.add(ReleaseStatusDto.builder()
 						.name(metric.has("release") ? metric.get("release").asText() :
 								(metric.has("name") ? metric.get("name").asText() : ""))
@@ -207,8 +237,13 @@ public class MonitServiceImpl implements MonitService {
 						.status(status)
 						.chart(metric.has("chart") ? metric.get("chart").asText() : "")
 						.chartVersion(metric.has("version") ? metric.get("version").asText() : "")
-						.updated(metric.has("updated") ? metric.get("updated").asText() : "")
+						.updated(updatedFormatted)
 						.gpuUtil(gpuUtil)
+						.gpuName(gpuName)
+						.gpuTemp(gpuTemp)
+						.gpuPowerWatt(gpuPower)
+						.vramUsedMb(vramUsed)
+						.vramTotalMb(vramTotal)
 						.build());
 			}
 		}
