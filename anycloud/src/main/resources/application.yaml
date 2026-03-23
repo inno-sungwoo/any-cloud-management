@@ -240,10 +240,10 @@ prometheus:
         helm_chart_info{description!~".*failed.*"}
     cost:
       gpu_usage_by_ns: |
-        sum by (namespace) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"}) or vector(0)
+        max by (namespace) (sum by (namespace, instance) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"})) or vector(0)
       gpu_count_by_ns: |
-        sum by (namespace) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"}) or vector(0)
+        max by (namespace) (sum by (namespace, instance) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"})) or vector(0)
       gpu_util_range: |
-        sum by (namespace) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"})
+        max by (namespace) (sum by (namespace, instance) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"}))
 
       
