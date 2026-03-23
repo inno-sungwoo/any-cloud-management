@@ -59,8 +59,10 @@ public class CostServiceImpl implements CostService {
 
         if (result.isArray()) {
             for (JsonNode node : result) {
-                String namespace = node.path("metric").path("namespace").asText("unknown");
+                String namespace = node.path("metric").path("namespace").asText("");
+                if (namespace.isEmpty() || "unknown".equals(namespace)) continue;
                 int gpuCount = (int) node.path("value").get(1).asDouble(0);
+                if (gpuCount <= 0) continue;
                 long costKrw = gpuCount * GPU_HOUR_KRW * 24;
                 teams.add(CostSummaryDto.TeamCost.builder()
                         .namespace(namespace)
