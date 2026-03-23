@@ -130,6 +130,16 @@ public class CostServiceImpl implements CostService {
         String monitUrl = getMonitUrl(clusterName);
         String gpuUtilQuery = prometheusQueryService.resolve("cost", "gpu_util_range", null);
 
+        // GPU 실시간 활용률 조회
+        double currentGpuUtil = 0.0;
+        try {
+            JsonNode utilResult = executeQueryRaw(monitUrl, "query",
+                    "avg(nvidia_smi_utilization_gpu_ratio) * 100");
+            if (utilResult.isArray() && utilResult.size() > 0) {
+                currentGpuUtil = utilResult.get(0).path("value").get(1).asDouble(0.0);
+            }
+        } catch (Exception ignored) {}
+
         long end = Instant.now().getEpochSecond();
         long start = end - (7 * 24 * 3600);
         long step = 86400; // 1 day
@@ -141,14 +151,16 @@ public class CostServiceImpl implements CostService {
         List<CostReportDto.DailyEntry> entries = new ArrayList<>();
         if (result.isArray()) {
             for (JsonNode node : result) {
-                String namespace = node.path("metric").path("namespace").asText("unknown");
+                String namespace = node.path("metric").path("namespace").asText("");
+                if (namespace.isEmpty() || "unknown".equals(namespace)) continue;
                 JsonNode values = node.path("values");
                 if (values.isArray()) {
                     for (JsonNode val : values) {
                         long timestamp = val.get(0).asLong();
-                        double avgUtil = val.get(1).asDouble(0.0);
+                        double gpuCount = val.get(1).asDouble(0.0);
                         String date = dateFormatter.format(Instant.ofEpochSecond(timestamp));
-                        long costKrw = (long) (GPU_HOUR_KRW * 24 * (avgUtil / 100.0));
+                        long costKrw = (long) (gpuCount * GPU_HOUR_KRW * 24);
+                        double avgUtil = currentGpuUtil;
 
                         entries.add(CostReportDto.DailyEntry.builder()
                                 .date(date)

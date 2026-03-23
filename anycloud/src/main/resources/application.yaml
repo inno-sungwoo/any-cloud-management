@@ -244,6 +244,6 @@ prometheus:
       gpu_count_by_ns: |
         sum by (namespace) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"}) or vector(0)
       gpu_util_range: |
-        avg by (namespace) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"}) * 0 + avg(nvidia_smi_utilization_gpu_ratio) * 100
+        sum by (namespace) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"})
 
       
