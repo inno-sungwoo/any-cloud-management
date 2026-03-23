@@ -291,6 +291,22 @@ public class HelmCommandExecutor {
     }
 
     /**
+     * Helm uninstall 명령어를 빌드합니다.
+     */
+    public String buildHelmUninstallCommand(String releaseName, String namespace, String kubeconfigPath) {
+        StringBuilder command = new StringBuilder();
+        command.append("helm uninstall ")
+                .append(releaseName)
+                .append(" --kubeconfig ").append(kubeconfigPath);
+
+        if (namespace != null && !namespace.trim().isEmpty()) {
+            command.append(" --namespace ").append(namespace);
+        }
+
+        return command.toString();
+    }
+
+    /**
      * Helm status 명령어를 빌드합니다.
      */
     public String buildHelmStatusCommand(String releaseName, String namespace, String kubeconfigPath) {

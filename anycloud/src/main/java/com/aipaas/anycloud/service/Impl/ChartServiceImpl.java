@@ -399,4 +399,39 @@ public class ChartServiceImpl implements ChartService {
         return helmReleaseScanner.scanReleaseResources(cluster, namespace, releaseName);
     }
 
+    @Override
+    public ChartDeployResponseDto uninstallRelease(String releaseName, String clusterId, String namespace) {
+        log.info("Uninstalling release: {} from cluster: {}, namespace: {}", releaseName, clusterId, namespace);
+
+        ClusterEntity cluster = clusterService.getCluster(clusterId);
+        String kubeconfigPath = null;
+
+        try {
+            String kubeconfigContent = KubernetesClientConfig.createKubeconfigContent(cluster);
+            // kubeconfig 임시 파일 생성
+            java.nio.file.Path tempKubeconfig = java.nio.file.Files.createTempFile("kubeconfig_" + clusterId + "_", ".yaml");
+            java.nio.file.Files.write(tempKubeconfig, kubeconfigContent.getBytes());
+            kubeconfigPath = tempKubeconfig.toString();
+
+            // helm uninstall 실행
+            String command = helmCommandExecutor.buildHelmUninstallCommand(releaseName, namespace, kubeconfigPath);
+            String output = helmCommandExecutor.executeHelmCommand(command, kubeconfigPath);
+            log.info("Successfully uninstalled release: {}. Output: {}", releaseName, output);
+
+            // kubeconfig 삭제
+            java.nio.file.Files.deleteIfExists(tempKubeconfig);
+
+            return ChartDeployResponseDto.builder()
+                    .success(true)
+                    .message("릴리즈 '" + releaseName + "'이(가) 삭제되었습니다.")
+                    .build();
+
+        } catch (Exception e) {
+            log.error("Failed to uninstall release: {}", releaseName, e);
+            if (kubeconfigPath != null) {
+                try { java.nio.file.Files.deleteIfExists(java.nio.file.Path.of(kubeconfigPath)); } catch (Exception ignored) {}
+            }
+            throw new HelmDeploymentException("릴리즈 삭제 실패: " + e.getMessage());
+        }
+    }
 }

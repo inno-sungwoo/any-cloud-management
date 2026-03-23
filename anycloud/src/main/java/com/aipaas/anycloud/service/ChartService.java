@@ -98,4 +98,9 @@ public interface ChartService {
      * @return 릴리즈 목록
      */
     List<? extends HasMetadata> getHelmResources(String clusterName, String namespace, String releaseName);
+
+    /**
+     * Helm 릴리즈를 삭제(언인스톨)합니다.
+     */
+    ChartDeployResponseDto uninstallRelease(String releaseName, String clusterId, String namespace);
 }
