@@ -441,6 +441,15 @@ public class ChartServiceImpl implements ChartService {
             if (kubeconfigPath != null) {
                 try { java.nio.file.Files.deleteIfExists(java.nio.file.Path.of(kubeconfigPath)); } catch (Exception ignored) {}
             }
+            // "not found" 에러는 이미 삭제된 릴리즈 — 성공으로 처리
+            String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.contains("not found") || msg.contains("release: not found")) {
+                log.info("Release '{}' already removed from cluster", releaseName);
+                return ChartDeployResponseDto.builder()
+                        .success(true)
+                        .message("릴리즈 '" + releaseName + "'은(는) 이미 삭제되었습니다.")
+                        .build();
+            }
             throw new HelmDeploymentException("릴리즈 삭제 실패: " + e.getMessage());
         }
     }
