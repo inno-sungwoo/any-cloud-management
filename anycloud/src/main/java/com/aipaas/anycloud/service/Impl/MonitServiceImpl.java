@@ -250,7 +250,10 @@ public class MonitServiceImpl implements MonitService {
 				JsonNode metric = node.get("metric");
 				String releaseName = metric.has("release") ? metric.get("release").asText() :
 						(metric.has("name") ? metric.get("name").asText() : "");
-				String namespace = metric.has("namespace") ? metric.get("namespace").asText() : "";
+				// helm-exporter의 namespace는 exporter pod 네임스페이스(monitoring)이므로
+			// 실제 릴리즈 네임스페이스인 exported_namespace를 우선 사용
+			String namespace = metric.has("exported_namespace") ? metric.get("exported_namespace").asText() :
+					(metric.has("namespace") ? metric.get("namespace").asText() : "");
 				String description = metric.has("description") ? metric.get("description").asText() : "";
 				String status = description.contains("complete") ? "deployed" :
 								description.contains("failed") ? "failed" : description;
