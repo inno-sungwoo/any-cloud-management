@@ -233,16 +233,26 @@ public class ChartServiceImpl implements ChartService {
                     "Cannot connect to cluster: " + clusterId + ". Error: " + e.getMessage());
         }
 
-        // 비동기로 배포 실행 (DeploymentOrchestrator 사용)
-        deploymentOrchestrator.executeDeploymentAsync(repository, chartName, releaseName, clusterId, namespace,
-                version, valuesFile, cluster, this::createKubeconfigFile, this::deleteKubeconfigFile);
-
-        log.info("Deployment request submitted for release: {} to cluster: {}", releaseName, clusterId);
+        // 동기 배포 실행 — 결과를 클라이언트에 즉시 반환
+        try {
+            String kubeconfigPath = createKubeconfigFile(cluster);
+            try {
+                String command = helmCommandExecutor.buildHelmInstallCommand(repository, chartName, releaseName,
+                        namespace, version, valuesFile, kubeconfigPath);
+                helmCommandExecutor.executeHelmCommand(command, kubeconfigPath);
+                log.info("Successfully deployed release: {} to cluster: {}", releaseName, clusterId);
+            } finally {
+                deleteKubeconfigFile(kubeconfigPath);
+            }
+        } catch (Exception e) {
+            log.error("Failed to deploy release: {} to cluster: {}", releaseName, clusterId, e);
+            throw new HelmDeploymentException(
+                    "Deployment failed for release " + releaseName + ": " + e.getMessage());
+        }
 
         return ChartDeployResponseDto.builder()
                 .success(true)
-                .message("Deployment request submitted for release " + releaseName + " to cluster " + clusterId
-                        + ". Check status later.")
+                .message("Release " + releaseName + " deployed successfully to cluster " + clusterId)
                 .build();
     }
 
