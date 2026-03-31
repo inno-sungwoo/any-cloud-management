@@ -1,5 +1,6 @@
 package com.aipaas.anycloud.controller;
 
+import com.aipaas.anycloud.model.dto.request.GpuReservationRequestDto;
 import com.aipaas.anycloud.service.CostService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -77,5 +78,42 @@ public class CostController {
         @RequestParam("hours") int hours) {
         log.info("estimate cost for gpuCount: {}, hours: {}", gpuCount, hours);
         return new ResponseEntity<>(costService.estimate(gpuCount, hours), new HttpHeaders(), HttpStatus.OK);
+    }
+
+    // --- GPU Reservation API ---
+
+    @GetMapping("/reservations")
+    @Operation(summary = "GPU 예약 목록", description = "클러스터의 GPU 사용 예약 목록 조회")
+    public ResponseEntity<Object> getReservations(
+        @RequestParam("cluster") String clusterName) {
+        log.info("retrieve gpu reservations for cluster: {}", clusterName);
+        return new ResponseEntity<>(costService.getReservations(clusterName), new HttpHeaders(), HttpStatus.OK);
+    }
+
+    @PostMapping("/reservations")
+    @Operation(summary = "GPU 예약 등록", description = "배포 시 GPU 사용 예약 등록")
+    public ResponseEntity<Object> createReservation(@RequestBody GpuReservationRequestDto dto) {
+        log.info("create gpu reservation: {}", dto.getReleaseName());
+        return new ResponseEntity<>(costService.createReservation(dto), new HttpHeaders(), HttpStatus.CREATED);
+    }
+
+    @PutMapping("/reservations/{releaseName}/extend")
+    @Operation(summary = "GPU 예약 연장", description = "GPU 사용 예약 시간 연장")
+    public ResponseEntity<Object> extendReservation(
+        @PathVariable String releaseName,
+        @RequestParam("cluster") String clusterName,
+        @RequestParam("minutes") int additionalMinutes) {
+        log.info("extend gpu reservation: {} +{}min", releaseName, additionalMinutes);
+        return new ResponseEntity<>(costService.extendReservation(releaseName, clusterName, additionalMinutes), new HttpHeaders(), HttpStatus.OK);
+    }
+
+    @DeleteMapping("/reservations/{releaseName}")
+    @Operation(summary = "GPU 예약 삭제", description = "GPU 사용 예약 삭제")
+    public ResponseEntity<Object> deleteReservation(
+        @PathVariable String releaseName,
+        @RequestParam("cluster") String clusterName) {
+        log.info("delete gpu reservation: {}", releaseName);
+        costService.deleteReservation(releaseName, clusterName);
+        return new ResponseEntity<>(HttpStatus.NO_CONTENT);
     }
 }

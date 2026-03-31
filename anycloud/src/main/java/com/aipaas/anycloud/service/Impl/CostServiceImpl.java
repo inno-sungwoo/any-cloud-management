@@ -1,14 +1,19 @@
 package com.aipaas.anycloud.service.Impl;
 
 import com.aipaas.anycloud.error.exception.EntityNotFoundException;
+import com.aipaas.anycloud.model.dto.request.GpuReservationRequestDto;
 import com.aipaas.anycloud.model.dto.response.AlertDto;
 import com.aipaas.anycloud.model.dto.response.CostEstimateDto;
 import com.aipaas.anycloud.model.dto.response.CostReportDto;
 import com.aipaas.anycloud.model.dto.response.CostSummaryDto;
+import com.aipaas.anycloud.model.dto.response.GpuReservationResponseDto;
 import com.aipaas.anycloud.model.entity.ClusterEntity;
+import com.aipaas.anycloud.model.entity.GpuReservationEntity;
 import com.aipaas.anycloud.repository.ClusterRepository;
+import com.aipaas.anycloud.repository.GpuReservationRepository;
 import com.aipaas.anycloud.service.CostService;
 import com.aipaas.anycloud.service.PrometheusQueryService;
+import org.springframework.transaction.annotation.Transactional;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -38,6 +43,7 @@ public class CostServiceImpl implements CostService {
 
     private final ObjectMapper objectMapper;
     private final ClusterRepository clusterRepository;
+    private final GpuReservationRepository gpuReservationRepository;
     private final WebClient webClient;
     private final PrometheusQueryService prometheusQueryService;
 
@@ -204,6 +210,70 @@ public class CostServiceImpl implements CostService {
                 .hours(hours)
                 .unitPriceKrw(GPU_HOUR_KRW)
                 .totalCostKrw(totalCost)
+                .build();
+    }
+
+    // --- GPU Reservation ---
+
+    @Override
+    public List<?> getReservations(String clusterName) {
+        return gpuReservationRepository.findByClusterId(clusterName).stream()
+                .map(this::toReservationDto)
+                .toList();
+    }
+
+    @Override
+    @Transactional
+    public Object createReservation(GpuReservationRequestDto dto) {
+        // 기존에 같은 릴리즈가 있으면 덮어쓰기
+        gpuReservationRepository.findByReleaseNameAndClusterId(dto.getReleaseName(), dto.getClusterId())
+                .ifPresent(gpuReservationRepository::delete);
+
+        GpuReservationEntity entity = GpuReservationEntity.builder()
+                .releaseName(dto.getReleaseName())
+                .namespace(dto.getNamespace() != null ? dto.getNamespace() : "default")
+                .clusterId(dto.getClusterId())
+                .gpuCount(dto.getGpuCount() != null ? dto.getGpuCount() : 1)
+                .estimatedMinutes(dto.getEstimatedMinutes())
+                .unitPriceKrw(dto.getUnitPriceKrw() != null ? dto.getUnitPriceKrw() : 1200)
+                .estimatedCostKrw(dto.getEstimatedCostKrw() != null ? dto.getEstimatedCostKrw() : 0)
+                .deployedAt(java.time.LocalDateTime.now())
+                .build();
+
+        return toReservationDto(gpuReservationRepository.save(entity));
+    }
+
+    @Override
+    @Transactional
+    public Object extendReservation(String releaseName, String clusterName, int additionalMinutes) {
+        GpuReservationEntity entity = gpuReservationRepository
+                .findByReleaseNameAndClusterId(releaseName, clusterName)
+                .orElseThrow(() -> new EntityNotFoundException("Reservation not found: " + releaseName));
+
+        entity.setEstimatedMinutes(entity.getEstimatedMinutes() + additionalMinutes);
+        double hours = entity.getEstimatedMinutes() / 60.0;
+        entity.setEstimatedCostKrw((int) Math.round(entity.getGpuCount() * hours * entity.getUnitPriceKrw()));
+
+        return toReservationDto(gpuReservationRepository.save(entity));
+    }
+
+    @Override
+    @Transactional
+    public void deleteReservation(String releaseName, String clusterName) {
+        gpuReservationRepository.deleteByReleaseNameAndClusterId(releaseName, clusterName);
+    }
+
+    private GpuReservationResponseDto toReservationDto(GpuReservationEntity entity) {
+        return GpuReservationResponseDto.builder()
+                .id(entity.getId())
+                .releaseName(entity.getReleaseName())
+                .namespace(entity.getNamespace())
+                .clusterId(entity.getClusterId())
+                .gpuCount(entity.getGpuCount())
+                .estimatedMinutes(entity.getEstimatedMinutes())
+                .unitPriceKrw(entity.getUnitPriceKrw())
+                .estimatedCostKrw(entity.getEstimatedCostKrw())
+                .deployedAt(entity.getDeployedAt().toString())
                 .build();
     }
 
