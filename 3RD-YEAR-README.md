@@ -9,7 +9,7 @@
 
 ## 1. 개요
 
-3차년도 과제의 백엔드 구현. Prometheus 연동 모니터링 API, GPU 비용 관리 API, 감사 로그 API, Helm 보안 검증(dry-run), GPU 예약제 API 등을 개발했다.
+3차년도 과제의 백엔드를 구현하였습니다. Prometheus 연동 모니터링 API, GPU 비용 관리 API, 감사 로그 API, Helm 보안 검증(dry-run), GPU 예약제 API 등을 개발하였습니다.
 
 ## 2. 실행 방법
 
@@ -43,8 +43,8 @@ server.port=8888
 server.servlet.context-path=/api/v1
 ```
 
-> Prometheus URL은 DB의 `cluster` 테이블 `monit_server_url` 컬럼에서 읽는다.
-> 현재: `http://prometheus.aipaas` (macOS에서는 /etc/hosts에 등록 필요)
+> Prometheus URL은 DB의 `cluster` 테이블 `monit_server_url` 컬럼에서 읽어옵니다.
+> 현재: `http://prometheus.aipaas` (macOS에서는 /etc/hosts에 등록이 필요합니다)
 
 ---
 
@@ -194,7 +194,7 @@ CREATE TABLE gpu_reservation (
 );
 ```
 
-> 기존 `cluster`, `helm_repo` 테이블은 변경 없음.
+> 기존 `cluster`, `helm_repo` 테이블은 변경 사항이 없습니다.
 
 ---
 
@@ -211,9 +211,9 @@ CREATE TABLE gpu_reservation (
 
 ## 9. 알려진 이슈
 
-- **Helm CLI 의존**: `HelmCommandExecutor`가 서버의 `helm` CLI를 직접 호출. PATH에 helm 바이너리 필요.
-- **Prometheus DNS**: Java(Netty)는 macOS `/etc/resolver` 무시. `/etc/hosts`에 `prometheus.aipaas` 등록 필수.
-- **SnakeYAML 파싱**: bitnami 대형 차트 values.yaml 파싱 시 128MB 제한 설정 필요 (적용 완료).
+- **Helm CLI 의존**: `HelmCommandExecutor`가 서버의 `helm` CLI를 직접 호출합니다. PATH에 helm 바이너리가 필요합니다.
+- **Prometheus DNS**: Java(Netty)는 macOS `/etc/resolver`를 무시합니다. `/etc/hosts`에 `prometheus.aipaas`를 등록해 주세요.
+- **SnakeYAML 파싱**: bitnami 대형 차트 values.yaml 파싱 시 128MB 제한 설정이 필요합니다 (적용 완료).
 
 ---
 
