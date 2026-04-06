@@ -1,485 +1,379 @@
-# 3차년도 백엔드 인수인계 가이드
+# AI-PaaS 플랫폼 인수인계 문서
 
-> **브랜치**: `feat/3rd-year-monitoring-apis`
-> **주제**: 카탈로그 기반 MLOps 개발 환경 자동 구축 기술 — 최적화 및 고도화
-> **변경 규모**: 28 files changed, 1,532 insertions, 23 deletions
-
-이 문서 하나로 ai-pass-3 레포 없이 백엔드 인수인계가 가능합니다.
+**작성일**: 2026-04-06  
+**작성자**: 개발팀  
 
 ---
 
-## 1. 환경 구축 (처음부터)
+## 1. 프로젝트 구조
 
-### 1.1 사전 요구사항
-
-| 항목 | 버전 | 설치 |
-|------|------|------|
-| Docker Desktop | K8s 활성화 | Settings → Kubernetes → Enable |
-| Helm | 3.x | `brew install helm` |
-| kubectl | 1.28+ | Docker Desktop 포함 |
-| Java | 17+ (OpenJDK) | `sdk install java 21.0.9-tem` |
-| dnsmasq | latest | `brew install dnsmasq` |
-
-### 1.2 DNS 설정 (macOS)
-
-```bash
-# dnsmasq 와일드카드 DNS
-brew install dnsmasq
-echo 'address=/.aipaas/127.0.0.1' >> /opt/homebrew/etc/dnsmasq.conf
-sudo brew services restart dnsmasq
-
-# macOS resolver 등록
-sudo mkdir -p /etc/resolver
-echo 'nameserver 127.0.0.1' | sudo tee /etc/resolver/aipaas
-
-# [필수] Java(Netty)는 /etc/resolver를 무시 → /etc/hosts에 직접 등록
-echo '127.0.0.1 prometheus.aipaas alertmanager.aipaas' | sudo tee -a /etc/hosts
+```
+ai-paas/
+├── ai-paas-web/          # 프론트엔드 (React + Vite + TypeScript)
+│   ├── src/
+│   │   ├── pages/        # 페이지 컴포넌트
+│   │   ├── hooks/        # React Query 훅 (API 연동)
+│   │   ├── components/   # 재사용 컴포넌트
+│   │   └── types/        # TypeScript 타입 정의
+│   ├── e2e/              # Playwright E2E 테스트
+│   └── playwright.config.ts
+│
+└── any-cloud-management/ # 백엔드 (Spring Boot + Java 21)
+    ├── anycloud/src/main/java/com/aipaas/anycloud/
+    │   ├── controller/   # REST API 컨트롤러
+    │   ├── service/      # 비즈니스 로직
+    │   └── model/        # Entity, DTO
+    ├── docker-compose.yml  # MariaDB
+    └── anycloud/src/main/resources/
+        ├── application.properties  # DB, 서버 설정
+        └── application.yaml        # Prometheus 쿼리 정의
 ```
 
-> **핵심 주의**: `/etc/hosts` 등록 안 하면 백엔드에서 Prometheus 접속 불가
+---
 
-### 1.3 K8s 인프라 설치
+## 2. 환경 시작 방법
 
+### 2-1. 데이터베이스 (MariaDB)
 ```bash
-# 네임스페이스
-kubectl create namespace monitoring
-kubectl create namespace ai-pass3
-
-# Nginx Ingress Controller
-helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-helm install ingress-nginx ingress-nginx/ingress-nginx \
-  --namespace ingress-nginx --create-namespace \
-  --set controller.service.type=LoadBalancer
-
-# Prometheus Stack
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm install ai-pass3-prom prometheus-community/kube-prometheus-stack \
-  --namespace monitoring \
-  -f docs/infrastructure/ai-pass3-prometheus-values.yaml
-
-# Ingress (prometheus.aipaas, alertmanager.aipaas)
-kubectl apply -f docs/infrastructure/ingress.yaml
-
-# Mock GPU Exporter (실제 GPU 없음, 4x RTX 3060 시뮬레이션)
-cd docs/infrastructure/mock-nvidia-smi-exporter
-docker build -t mock-nvidia-smi-exporter:latest .
-kubectl apply -f deployment.yaml
-cd -
-
-# GPU ResourceQuota (4개 제한)
-kubectl apply -f docs/infrastructure/gpu-quota.yaml
-
-# GPU 가격 ConfigMap (단가 정보)
-kubectl apply -f docs/infrastructure/gpu-pricing-configmap.yaml
-
-# helm-exporter (릴리즈 메트릭 수집)
-helm repo add speakeasyapi https://speakeasyapi.github.io/helm-exporter
-helm install helm-exporter speakeasyapi/helm-exporter \
-  --namespace monitoring \
-  -f docs/infrastructure/helm-exporter-values.yaml
-kubectl apply -f docs/infrastructure/helm-exporter-servicemonitor.yaml
+cd any-cloud-management
+docker compose up -d
+# MariaDB: localhost:13306, user: anycloud, pw: anycloud, db: aipaas
 ```
 
-> `honorLabels: true` 없으면 모든 릴리즈의 namespace가 `monitoring`으로 표시됨
-
-### 1.4 ChartMuseum (차트 저장소)
-
+### 2-2. 백엔드 (Spring Boot)
 ```bash
-docker run -d --name chartmuseum \
-  -p 8880:8080 \
-  -e STORAGE=local \
-  -e STORAGE_LOCAL_ROOTDIR=/charts \
-  ghcr.io/helm/chartmuseum:v0.16.0
-
-# MLOps 차트 6종 등록
-bash docs/infrastructure/sample-charts/create-charts.sh
-
-# Helm CLI 레포 등록
-helm repo add chart-museum-external http://localhost:8880
-helm repo update
-```
-
-### 1.5 MariaDB
-
-```bash
-docker run -d --name anycloud-db \
-  -p 13306:3306 \
-  -e MYSQL_ROOT_PASSWORD=yourP@ssW0rds \
-  -e MYSQL_DATABASE=aipaas \
-  -e MYSQL_USER=anycloud \
-  -e MYSQL_PASSWORD=anycloud \
-  mariadb:10.11
-```
-
-DB 초기화: `docs/infrastructure/db-init.sql`의 플레이스홀더(`@@API_SERVER_URL@@` 등)를 kubeconfig에서 추출한 실제 값으로 치환 후 실행.
-
-```bash
-# K8s API 서버 URL 확인 (포트가 랜덤이므로 동적 추출 필요)
-kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
-```
-
-### 1.6 백엔드 시작
-
-```bash
-git checkout feat/3rd-year-monitoring-apis
-export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+cd any-cloud-management
 ./gradlew :anycloud:bootRun
-# → http://localhost:8888
+# http://localhost:8888
+# Swagger: http://localhost:8888/api/v1/docs
 ```
 
-### 1.7 헬스 체크
-
+### 2-3. 프론트엔드 (Vite)
 ```bash
-curl -s localhost:8888/api/v1/system/clusters | python3 -m json.tool
-curl -s "http://prometheus.aipaas/api/v1/query?query=up" | head -5
-curl -s http://localhost:8880/api/charts | python3 -m json.tool
+cd ai-paas-web
+pnpm install
+pnpm dev
+# http://localhost:5173
 ```
+
+### 2-4. 로그인
+- URL: http://localhost:5173/login
+- 인증: localStorage에 JWT 토큰 저장 (accessToken, refreshToken)
+- 로그인 후 `/infra-management/monitoring-dashboard`로 리다이렉트
 
 ---
 
-## 2. 아키텍처
+## 3. 주요 기능 테스트 가이드
 
+### 테스트 순서대로 진행하세요.
+
+### 3-1. E2E 테스트 실행
+```bash
+cd ai-paas-web
+pnpm test:e2e        # 31개 테스트 자동 실행
+pnpm test:e2e:report # HTML 리포트 확인
 ```
-macOS (Docker Desktop)
-├── Docker Desktop K8s (context: docker-desktop)
-│   ├── monitoring NS
-│   │   ├── Prometheus Stack (kube-prometheus-stack)
-│   │   └── helm-exporter (ServiceMonitor + honorLabels)
-│   ├── ai-pass3 NS
-│   │   ├── mock-nvidia-smi-exporter (4x RTX 3060 시뮬레이션)
-│   │   ├── ResourceQuota (GPU 4개 제한)
-│   │   └── 배포된 서비스들 (gpu-jupyter, mlflow 등)
-│   └── ingress-nginx NS
-│       └── nginx ingress controller
-├── Docker 컨테이너
-│   ├── MariaDB (port 13306)
-│   └── ChartMuseum (port 8880)
-├── 네이티브 프로세스
-│   ├── Spring Boot 백엔드 (port 8888)
-│   └── Vite 프론트엔드 (port 5173)
-└── dnsmasq (*.aipaas → 127.0.0.1)
+- 로그인 페이지 렌더링, 인증 리다이렉트, 주요 페이지 접근 테스트
+- 테스트 파일: `e2e/login.spec.ts`, `e2e/navigation.spec.ts`, `e2e/dashboard.spec.ts`, `e2e/infra.spec.ts`
+
+### 3-2. 모니터링 대시보드
+**URL**: http://localhost:5173/infra-management/monitoring-dashboard
+
+확인 항목:
+- [ ] 상단 카드 4개: 헬름 릴리즈(13), GPU 수(1), 평균 GPU 활용률, 활성 알림
+- [ ] 리소스 게이지: CPU, Memory, GPU 사용률 (실시간 Prometheus 데이터)
+- [ ] 리소스 현황: CPU, 메모리, 파일시스템, 파드, GPU 게이지 5개
+- [ ] 파드 섹션: 네임스페이스별 Pod 수 테이블 (총 ~314개, 실시간)
+- [ ] 성능 지표: CPU 사용량, CPU Load Average 라인차트 (실시간)
+- [ ] GPU 현황 테이블: **RTX 3060 실제 데이터** (온도 ~45C, 전력 ~21W, VRAM 12GB)
+- [ ] 헬름 릴리즈 현황: 배포된 릴리즈 목록
+- [ ] 활성 알림: 알림 목록
+
+### 3-3. 이벤트 페이지
+**URL**: http://localhost:5173/infra-management/event
+
+확인 항목:
+- [ ] K8s 이벤트가 실시간으로 표시됨 (30초 ���신)
+- [ ] 클러스터/네임스페이스 필터 동작
+- [ ] 실시간/일시���지 토글
+- [ ] Warning/Normal 이벤트가 타임라인 UI로 표시
+
+### 3-4. 감사 로��
+**URL**: http://localhost:5173/infra-management/audit-log
+
+확인 항목:
+- [ ] 네임스페���스별 K8s 이벤트 테이블
+- [ ] 최신순/오래된순 정렬
+- [ ] 이��트 수 카운트
+
+### 3-5. 카탈로그 배포 (Helm 차트 배포)
+**URL**: http://localhost:5173/infra-management/application/catalog
+
+테스트 시나리오:
+1. [ ] 차트 목록이 표시���는지 확인
+2. [ ] 차트 선택 (예: gpu-jupyter) -> "배포" 클릭
+3. [ ] 릴리즈 이름이 자동 생성되는지 확인 (예: `gpu-jupyter-m3k5p2`)
+4. [ ] "자동 생성" 버튼으로 새 이름 생성 가능
+5. [ ] values.yaml 편집기에 기본값 로드 + ingress host 자동 설정
+6. [ ] "배포" -> 보안 검사 -> 비용 추정 모달 -> "배포" 확인
+7. [ ] 배포 성공 시 토스트 메시지
+8. [ ] 배포 실패 시 에러 메시지 표시 (이름 중복, 쿼터 초과 등)
+9. [ ] 배포 완료 후 접속 URL 확인: `http://{릴리즈이름}.192.168.201.171.nip.io`
+
+**핵심 로직**: 배포 성공 후에만 GPU 예약이 생성됨 (고아 예약 방��)
+
+### 3-6. 배포된 서비스 접속 테스트
+배포 완료 후 브라우저에서 직접 접속:
 ```
+http://{릴리즈이름}.192.168.201.171.nip.io
+```
+- 예시: http://gpu-jupyter-sungwoo32.192.168.201.171.nip.io
+- Jupyter Lab 토큰: Pod 로그에서 확인
+  ```bash
+  kubectl exec -n ai-pass3 <pod-name> -- jupyter server list
+  ```
+- DNS 설정 불필요 (nip.io가 자동으로 192.168.201.171로 해석)
+- 릴리즈 이름만 다르면 여러 사용자가 동시에 각자 서비스 접속 가능
 
-### 백엔드 → Prometheus 연동 흐름
+### 3-7. 헬름 릴리즈 관리
+**URL**: http://localhost:5173/infra-management/application/helm-release
 
-1. DB `cluster` 테이블의 `monit_server_url` = `http://prometheus.aipaas`
-2. 백엔드가 DB에서 URL 읽음
-3. Prometheus HTTP API (`/api/v1/query`) 직접 REST 호출
-4. 별도 SDK 없음, `RestTemplate`으로 PromQL 실행
+테스트 ���나리오:
+1. [ ] 릴리즈 목록 표시 (네임스페이스 필터)
+2. [ ] 릴리즈 삭제 -> 확인 모달 -> 삭제
+3. [ ] ���제 시 GPU 예약도 자동 삭제되는지 확인
+4. [ ] 삭제 후 서비스 URL 접속 불가 확인
 
-### Prometheus 메트릭 소스
+### 3-8. 비용 최적화
+**URL**: http://localhost:5173/infra-management/cost-optimization
 
-| 컴포넌트 | 네임스페이스 | 수집 방식 |
-|----------|------------|----------|
-| kube-state-metrics | monitoring | 자동 (Stack 포함) |
-| node-exporter | monitoring | 자동 (Stack 포함) |
-| mock-nvidia-smi-exporter | ai-pass3 | ServiceMonitor |
-| helm-exporter | monitoring | ServiceMonitor (수동 적용) |
+확인 항목:
+- [ ] GPU 사용 예약 목록 (배포 시 자동 생성, 삭제 시 자동 제거)
+- [ ] 예약 시간 연장 기능
+- [ ] 유휴 GPU 경고
+- [ ] 비용 리포트
 
-`serviceMonitorSelectorNilUsesHelmValues: false` 설정으로 **모든 NS의 ServiceMonitor 자동 수집**.
+### 3-9. 클러스터 관리
+**URL**: http://localhost:5173/infra-management/cluster-management
+
+��인 항목:
+- [ ] 클러스터 목록 (innogrid-aikube)
+- [ ] 노��� 상태 표시
 
 ---
 
-## 3. 신규/수정 코드 상세
+## 4. 인프라 현황
 
-**베이스 경로**: `anycloud/src/main/java/com/aipaas/anycloud/`
-
-### 3.1 Controller (3개 신규)
-
-| 파일 | API Prefix | 설명 |
-|------|-----------|------|
-| `controller/MonitController.java` | `/monit/` | 모니터링 (summary, releases, alerts, gpu-status, node resource) |
-| `controller/CostController.java` | `/cost/` | 비용 관리 + GPU 예약 CRUD |
-| `controller/AuditController.java` | `/audit/` | 감사 로그 (K8s events) |
-
-### 3.2 Service (6개 신규)
-
-| 파일 | 역할 |
-|------|------|
-| `service/MonitService.java` | 모니터링 인터페이스 |
-| `service/Impl/MonitServiceImpl.java` | Prometheus PromQL 실행 + 파싱 |
-| `service/CostService.java` | 비용 인터페이스 |
-| `service/Impl/CostServiceImpl.java` | GPU 비용 계산 + 예약 CRUD |
-| `service/AuditService.java` | 감사 로그 인터페이스 |
-| `service/Impl/AuditServiceImpl.java` | K8s Events API 조회 (fabric8) |
-
-### 3.3 DTO (9개 신규)
-
-| 파일 | 용도 |
-|------|------|
-| `model/dto/MonitoringSummaryDto.java` | 대시보드 요약 |
-| `model/dto/ReleaseStatusDto.java` | 릴리즈 상태 |
-| `model/dto/AlertDto.java` | 활성 알림 |
-| `model/dto/CostSummaryDto.java` | 비용 요약 |
-| `model/dto/CostReportDto.java` | 7일 리포트 |
-| `model/dto/CostEstimateDto.java` | 비용 추정 |
-| `model/dto/AuditEventDto.java` | K8s 이벤트 |
-| `model/dto/request/GpuReservationRequestDto.java` | GPU 예약 요청 |
-| `model/dto/response/GpuReservationResponseDto.java` | GPU 예약 응답 |
-
-### 3.4 Entity / Repository (2개 신규)
-
-| 파일 | 설명 |
-|------|------|
-| `model/entity/GpuReservationEntity.java` | JPA Entity - gpu_reservation 테이블 |
-| `repository/GpuReservationRepository.java` | JPA Repository |
-
-### 3.5 유틸리티 (2개 신규)
-
-| 파일 | 설명 |
-|------|------|
-| `service/util/PrometheusMetricProperties.java` | application.yaml PromQL → Java 매핑 |
-| `service/util/PrometheusQueryService.java` | PromQL 템플릿 resolve + 변수 치환 |
-
-### 3.6 수정된 기존 파일
-
-| 파일 | 변경 |
-|------|------|
-| `service/Impl/ChartServiceImpl.java` | 비동기→동기 배포, not-found 삭제 성공 처리 |
-| `error/handler/GlobalExceptionHandler.java` | HelmDeploymentException 400→500 변경 |
-| `service/util/FormatConverter.java` | 타임스탬프 포맷 변환 추가 |
-
----
-
-## 4. API 엔드포인트 전체
-
-### 모니터링
-
-| Method | Path | 설명 |
-|--------|------|------|
-| GET | `/monit/monitoring/summary?cluster=` | 대시보드 4개 요약 카드 |
-| GET | `/monit/monitoring/releases?cluster=` | 헬름 릴리즈 + GPU 매핑 |
-| GET | `/monit/monitoring/alerts?cluster=` | 활성 알림 목록 |
-| GET | `/monit/monitoring/gpu-status?cluster=` | GPU 카드별 실시간 상태 |
-| GET | `/monit/nodeStatus/{cluster}` | 노드 리소스 상태 |
-| GET | `/monit/resourceMonit/{cluster}/{type}/{key}` | 리소스 게이지 (CPU/Mem/Disk/Pod) |
-
-### 비용 관리 + GPU 예약
-
-| Method | Path | 설명 |
-|--------|------|------|
-| GET | `/cost/summary?cluster=&ns=` | NS별 GPU 비용 요약 |
-| GET | `/cost/idle-warnings?cluster=&ns=` | 유휴 GPU 경고 |
-| GET | `/cost/report?cluster=&ns=` | 7일 사용 리포트 |
-| GET | `/cost/estimate?cluster=&gpuCount=&hours=` | 비용 추정 |
-| GET | `/cost/reservations?cluster=` | GPU 예약 목록 |
-| POST | `/cost/reservations` | GPU 예약 등록 |
-| PUT | `/cost/reservations/{releaseName}/extend?cluster=&minutes=` | 예약 연장 |
-| DELETE | `/cost/reservations/{releaseName}?cluster=` | 예약 삭제 |
-
-### 감사 로그
-
-| Method | Path | 설명 |
-|--------|------|------|
-| GET | `/audit/events?cluster=&ns=` | K8s 이벤트 |
-
-### 차트 (기존 확장)
-
-| Method | Path | 설명 |
-|--------|------|------|
-| GET | `/charts/{repoName}/{chartName}/values` | values.yaml 조회 |
-| POST | `/charts/deploy` | 차트 배포 (helm install) |
-| DELETE | `/charts/{cluster}/{ns}/{releaseName}` | 릴리즈 삭제 |
-
----
-
-## 5. DB 스키마
-
-### 기존 테이블 (변경 없음)
-
-| 테이블 | 용도 | 주요 데이터 |
-|--------|------|-----------|
-| `cluster` | K8s 클러스터 정보 | API URL, 인증서, `monit_server_url` (Prometheus URL) |
-| `helm_repo` | Helm 저장소 정보 | bitnami, chart-museum-external |
-
-### 신규 테이블
-
-```sql
-CREATE TABLE gpu_reservation (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  release_name VARCHAR(100) NOT NULL,
-  namespace VARCHAR(100) NOT NULL DEFAULT 'default',
-  cluster_id VARCHAR(45) NOT NULL,
-  gpu_count INT NOT NULL DEFAULT 1,
-  estimated_minutes INT NOT NULL,
-  unit_price_krw INT NOT NULL DEFAULT 1200,
-  estimated_cost_krw INT NOT NULL DEFAULT 0,
-  deployed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_release_cluster (release_name, cluster_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
-
-### 접속 정보
+### 4-1. Kubernetes 클러스터
 
 | 항목 | 값 |
 |------|-----|
-| Host | localhost:13306 |
+| API Server | https://192.168.201.171:6443 |
+| 인증 방식 | 클라���언트 인증서 (만료: 2027-03-19) |
+| 노드 수 | 8개 (1 CP + 6 Worker + 1 GPU) |
+| GPU 노드 | `ai-platform` (NVIDIA GeForce RTX 3060, 12GB VRAM) |
+| Ingress VIP | 192.168.201.171 (nginx ingress, hostNetwork) |
+
+노드 목록:
+| 노드 | IP | 역할 | GPU |
+|------|-----|------|-----|
+| ai-platform-k8s-cp-1 | 10.10.2.247 | Control Plane | - |
+| ai-platform-k8s-worker-1 | 10.10.2.38 | Worker | - |
+| ai-platform-k8s-worker-2 | 10.10.2.166 | Worker | - |
+| ai-platform-k8s-worker-3 | 10.10.2.75 | Worker | - |
+| ai-platform-k8s-worker-4 | 10.10.2.107 | Worker | - |
+| ai-platform-k8s-worker-5 | 10.10.2.208 | Worker | - |
+| ai-platform-k8s-worker-6 | 10.10.2.61 | Worker | - |
+| ai-platform | 192.168.190.53 | Worker + GPU | RTX 3060 (12GB) |
+
+### 4-2. GPU Operator
+```
+네임스페이스: gpu-operator
+구성:
+- NVIDIA Driver: 580.126.20 (컨테이너 드라이버)
+- Device Plugin: nvidia.com/gpu=1 리소스 등록
+- DCGM Exporter: 실시간 GPU 메트릭 수집
+- Container Toolkit: GPU 컨테이너 지원
+- GPU Feature Discovery: 노드 라벨 자동 설정
+```
+
+GPU 상태 확인:
+```bash
+export KUBECONFIG=/tmp/test-kubeconfig.yaml
+kubectl exec -n gpu-operator <nvidia-driver-pod> -- nvidia-smi
+```
+
+### 4-3. Prometheus
+
+| 항목 | 값 |
+|------|-----|
+| URL | http://192.168.201.171:31935 (NodePort) |
+| 네임스페이스 | ai-pass |
+| ��집 메트릭 | DCGM GPU, kube-state-metrics, node-exporter, helm-exporter |
+
+주요 GPU 메트릭:
+- `DCGM_FI_DEV_GPU_UTIL`: GPU 활용률 (%)
+- `DCGM_FI_DEV_GPU_TEMP`: GPU 온도 (C)
+- `DCGM_FI_DEV_POWER_USAGE`: GPU 전력 (W)
+- `DCGM_FI_DEV_FB_USED` / `DCGM_FI_DEV_FB_FREE`: VRAM 사용량 (MB)
+- `DCGM_FI_DEV_MEM_COPY_UTIL`: 메모리 활용률 (%)
+
+### 4-4. ��이터베이스
+
+| 항목 | 값 |
+|------|-----|
+| MariaDB | localhost:13306 (docker compose) |
 | DB | aipaas |
-| User | anycloud / anycloud (또는 root / yourP@ssW0rds) |
+| 계정 | anycloud / anycloud |
 
----
+### 4-5. 서비스 접속 (Ingress + nip.io)
 
-## 6. PromQL 쿼리 구조
-
-`application.yaml`에 PromQL 쿼리가 YAML로 정의되어 있으며, `PrometheusQueryService.resolve(group, key, filters)`로 호출됩니다.
-
-```yaml
-prometheus:
-  metrics:
-    node:       # 노드 상태
-    cpu:        # CPU total/usage/request/limit/load5
-    memory:     # Memory total/usage/request/limit
-    filesystem: # Disk total/usage
-    gpu:        # GPU total/usage/util/memory/temperature/power
-    pod:        # Pod total/used/usage_namespace
-    monitoring: # 대시보드 요약 (helm_releases, gpu_count, gpu_avg_util, active_alerts)
-    cost:       # 비용 (gpu_usage_by_ns, gpu_count_by_ns, gpu_util_range)
+배포된 서비스는 nip.io를 통해 DNS 설정 없이 접속 가능:
+```
+http://{릴리즈이���}.192.168.201.171.nip.io
 ```
 
-### 주요 PromQL
-
-```promql
-# GPU 평균 활용률
-avg(nvidia_smi_utilization_gpu_ratio)
-
-# GPU 현황 (모델별)
-nvidia_smi_utilization_gpu_ratio
-nvidia_smi_temperature_gpu
-nvidia_smi_power_draw_watts
-nvidia_smi_memory_used_bytes / nvidia_smi_memory_total_bytes
-
-# 헬름 릴리즈 목록
-helm_chart_info
-
-# 활성 알림
-ALERTS{alertstate="firing"}
-
-# GPU 단가 (ConfigMap)
-kubectl get configmap gpu-pricing -n monitoring -o json
+작동 원리:
+```
+브라우저: gpu-jupyter-abc.192.168.201.171.nip.io
+  -> nip.io DNS: 192.168.201.171 응답
+  -> Ingress Controller: Host 헤더로 라우팅
+  -> 해당 Pod로 전달
 ```
 
----
-
-## 7. 주요 기술 결정 사항
-
-### helm-exporter + honorLabels
-
-- **문제**: helm-exporter가 monitoring NS에서 실행 → Prometheus가 `namespace=monitoring` 덮어씀
-- **해결**: ServiceMonitor에 `honorLabels: true` + 백엔드에 `exported_namespace` fallback
-
-### Prometheus 동기화 지연
-
-- **문제**: helm-exporter 30초 scrape → 삭제 직후 stale 데이터
-- **해결**: 프론트엔드에서 60초간 `hiddenNames`로 숨김
-
-### 비동기→동기 배포
-
-- `ChartServiceImpl`에서 helm install 결과를 동기적으로 반환
-
-### 비용 추정 API 소수 시간
-
-- `/cost/estimate?hours=0.033` → int 파라미터라 400 에러
-- 프론트에서 1시간 기준 단가 조회 후 로컬 계산으로 우회
+향후 내부 DNS에 `*.aipaas -> 192.168.201.171` 와일드카드 레코드를 추가하면,
+`DeployCatalogModal.tsx`의 `INGRESS_DOMAIN` 상수를 `'aipaas'`로 변경하여
+`http://{릴리즈이름}.aipaas`로 접속 가능.
 
 ---
 
-## 8. 운영 K8s 이관 시 변경사항
+## 5. 주요 변경 사항 (2026-04-06)
 
-| 항목 | Docker Desktop (현재) | 운영 K8s |
-|------|---------------------|----------|
-| DNS | dnsmasq `*.aipaas → 127.0.0.1` | 와일드카드 DNS `*.apps.innogrid.com → Ingress IP` |
-| /etc/hosts | prometheus.aipaas 수동 | 불필요 (DNS 서버가 처리) |
-| GPU | mock-nvidia-smi-exporter | 실제 NVIDIA GPU + nvidia-device-plugin + DCGM Exporter |
-| GPU Quota | gpu-quota.yaml (4개) | 실제 GPU 수에 맞게 조정 |
-| ChartMuseum | Docker (localhost:8880) | K8s 내부 서비스 |
-| DB cluster 테이블 | API Server URL 동적 추출 | 실제 K8s API 서버 주소 고정 |
-| Ingress 도메인 | `.aipaas` | `.apps.innogrid.com` |
-| Prometheus values | ai-pass3-prometheus-values.yaml | 운영 환경용 values |
+### 5-1. GPU 통합 (하드웨어 -> 메트릭 -> 화면 전체 파이프라인)
 
-### GPU 이관
+```
+[물리 GPU] RTX 3060 (ai-platform 노드)
+  -> [GPU Operator] Driver + Device Plugin + DCGM Exporter
+  -> [Prometheus] DCGM_FI_DEV_* 메트릭 수집 (NodePort 31935)
+  -> [백엔드] application.yaml DCGM 쿼리
+  -> [프론트엔드] 모니터링 대시보드 GPU 현황 표시
+```
+
+변경 파일:
+- `application.yaml`: `nvidia_smi_*` -> `DCGM_FI_DEV_*` 쿼리로 변경
+- `MonitServiceImpl.monitoringGpuStatus()`: DCGM 메트릭 기반 GPU 정보 수집, fallback 로직 추가
+- `GpuStatusTable.tsx`: nvidia-smi 없으면 GPU 할당 정보 표시, GPU 없으면 안내 메시지
+
+### 5-2. 클러스터 인증
+- OIDC 토큰(5분 만료) -> 클라이언트 인증서(1년 유효) 방식으로 전환
+- DB `cluster` 테이블에 `auth_type`, `oidc_*` 필��� 추가 (향��� OIDC 지원 대비)
+- `api_server_url`을 내부 IP(`192.168.201.171:6443`)로 변경
+
+### 5-3. 배포/삭제 흐름 개선
+
+배포 흐름 (고아 예약 방지):
+```
+카탈로그 -> 배포 모달 -> 비용 추정 -> deploy API 호출
+  -> 성공 시에만 reservation 생성
+  -> 실패 시 reservation 미생성 (깨끗한 상태 유지)
+```
+
+삭제 흐름 (자동 정리):
+```
+릴리즈 삭제 -> helm uninstall
+  -> 백엔드: costService.deleteReservation() 자동 호출
+  -> 프론트: DELETE /cost/reservations/{name} 추가 호출 (이중 안전)
+```
+
+기타:
+- 릴리즈 이름 자동 생성 (`{chartName}-{timestamp}`)
+- values.yaml ingress host 자동 설정 (`{릴리즈이름}.{INGRESS_DOMAIN}`)
+- 릴리즈 이름 변경 시 host도 자동 업데이트
+
+### 5-4. 모니터링 대시보��
+- `application.yaml`의 `kube_node_info` 조인 중복 해결 (`max by` 추가, 13곳)
+- Prometheus URL을 NodePort(31935)로 직접 접근 (포트포워딩 불필���)
+- 성능 지표: 하드코딩 목업 -> Prometheus 실시간 CPU usage/load average
+- 파드 섹션: 빈 배열 -> 네임스페이스별 Pod 수 실시간 조회
+- 리소스 게이지: 올바른 메트릭 키로 수정 (usage + total 비율 ���산)
+
+### 5-5. 이벤트 페이지
+- 하드코딩 목업 -> K8s 이벤트 실시간 조회 (`useGetAuditEvents` 훅)
+- 클러스터/네임스페이스 필터, 실시간/일시정지 토글
+
+### 5-6. E2E 테스트
+- Playwright 설정 및 31개 테스트 추가
+- 로그인, 네비게이���, 대시보드, 인프라 페이지
+- 실행: `pnpm test:e2e`
+
+### 5-7. 서비스 접속 (nip.io)
+- Helm 차트 배포 시 Ingress host를 `{릴리즈이름}.192.168.201.171.nip.io`로 자동 설정
+- DNS 설정/hosts 파일 수정 없이 즉시 접속 가능
+- 검증 완료: gpu-jupyter 배포 -> K8s Pod(GPU 할당) -> Jupyter Lab 브라우저 접속
+
+---
+
+## 6. 알려진 이슈 / 주의사항
+
+1. **클라���언트 인증서 만료**: 2027-03-19. 갱신 필요.
+2. **kube-state-metrics 중복**: 클러스터에 2개 설치됨 -> `application.yaml`에서 `max by`로 중복 제거 처리됨.
+3. **GPU 노드**: `ai-platform` 노드 1개만 GPU(RTX 3060) 보유. 다른 worker 노드에는 GPU 없음.
+4. **이벤트 페이지**: "전체" 네임스페이스 선택 시 실제로는 `ai-pass3`만 조회됨 (백엔드 API가 단일 namespace만 지원).
+5. **Helm 릴리즈 메트릭**: `helm_chart_info`는 ai-pass Prometheus(NodePort 31935)에만 있음.
+6. **nip.io 의존**: 현재 서비스 접속은 nip.io(외부 DNS 서비스)에 의존. 내부 DNS에 `*.aipaas -> 192.168.201.171` 설정 시 `INGRESS_DOMAIN` 상수 변경으로 전환 가능.
+7. **Prometheus duration 파라미터**: 백엔드 `timeRangeCreate`에서 10000 미만은 분 단위, 이상은 초 단위로 처리됨. 프론트엔드에서 `duration=10800`(3시간, 초)으로 호출.
+
+---
+
+## 7. 개발 명령어 참조
 
 ```bash
-# 1. NVIDIA Device Plugin
-kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.0/nvidia-device-plugin.yml
+# 프론트엔드
+cd ai-paas-web
+pnpm dev              # 개발 ���버 (http://localhost:5173)
+pnpm build            # 프로덕션 빌드
+pnpm test             # Vitest 단위 테스트
+pnpm test:e2e         # Playwright E2E ���스트
+pnpm test:e2e:ui      # Playwright UI 모드
+pnpm test:e2e:report  # E2E 테스트 리포트
+pnpm lint             # ESLint
 
-# 2. DCGM Exporter (실제 GPU 메트릭)
-helm install dcgm-exporter nvidia/dcgm-exporter \
-  --namespace monitoring \
-  -f docs/infrastructure/dcgm-exporter-values.yaml
+# 백엔드
+cd any-cloud-management
+./gradlew :anycloud:bootRun  # 개발 서버 (http://localhost:8888)
+./gradlew build              # 빌드
 
-# 3. mock-nvidia-smi-exporter 삭제
-kubectl delete -f docs/infrastructure/mock-nvidia-smi-exporter/deployment.yaml
+# 데이터베이스
+docker compose up -d
+docker exec anycloud-db mariadb -u anycloud -panycloud aipaas -e "SELECT * FROM cluster;"
 
-# 4. PromQL 수정 불필요 — nvidia_smi_* 메트릭명을 DCGM과 동일하게 맞춤
+# Kubernetes
+export KUBECONFIG=/tmp/test-kubeconfig.yaml
+kubectl get pods -A
+kubectl get nodes -o wide
+kubectl get ingress -A                    # Ingress 목록
+kubectl logs -n ai-pass3 <pod-name>       # Pod 로그
+
+# GPU 확인
+kubectl get pods -n gpu-operator          # GPU Operator Pod 상태
+kubectl exec -n gpu-operator <nvidia-driver-pod> -- nvidia-smi
+kubectl get node ai-platform -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'
+
+# Prometheus 직접 쿼리
+curl -s 'http://192.168.201.171:31935/api/v1/query?query=DCGM_FI_DEV_GPU_TEMP'
+
+# 배포된 서비스 접속
+# http://{릴리즈이름}.192.168.201.171.nip.io
+# Jupyter 토큰 확인:
+kubectl exec -n ai-pass3 <pod-name> -- jupyter server list
 ```
 
-### 도메인 이관
-
-차트 Ingress 템플릿 기본 도메인 변경:
-```yaml
-# docs/infrastructure/sample-charts/create-charts.sh 내
-# 변경 전: host: "{{ .Release.Name }}.aipaas"
-# 변경 후: host: "{{ .Release.Name }}.apps.innogrid.com"
-```
-
 ---
 
-## 9. 인프라 파일 목록 (docs/infrastructure/)
+## 8. 향후 개선 사항
 
-| 파일 | 용도 |
-|------|------|
-| `ai-pass3-prometheus-values.yaml` | Prometheus Stack Helm values (Docker Desktop용, GPU alerts + recording rules 포함) |
-| `prometheus-values.yaml` | Prometheus Stack Helm values (경량 운영용) |
-| `ingress.yaml` | prometheus.aipaas, alertmanager.aipaas Ingress |
-| `gpu-quota.yaml` | GPU ResourceQuota (ai-pass3 NS, 4개) |
-| `gpu-pricing-configmap.yaml` | GPU 모델별 시간당 단가 ConfigMap |
-| `gpu-alert-rules.yaml` | GPU 유휴 경고 PrometheusRule (운영용) |
-| `helm-exporter-values.yaml` | helm-exporter Helm values |
-| `helm-exporter-servicemonitor.yaml` | honorLabels ServiceMonitor (수동 적용) |
-| `nvidia-smi-exporter.yaml` | 실제 GPU용 nvidia-smi-exporter DaemonSet (운영용) |
-| `dcgm-exporter-values.yaml` | DCGM Exporter Helm values (운영용) |
-| `dcgm-exporter-consumer-gpu.yaml` | DCGM Exporter Consumer GPU 설정 (RTX 3060 등) |
-| `db-init.sql` | MariaDB 초기 데이터 (cluster, helm_repo) |
-| `mock-nvidia-smi-exporter/` | Mock GPU 메트릭 서버 (Dockerfile + exporter.py + K8s manifests) |
-| `sample-charts/create-charts.sh` | 6개 MLOps 차트 생성 + ChartMuseum 등록 |
-
----
-
-## 10. 알려진 이슈
-
-- **Helm CLI 의존**: `HelmCommandExecutor`가 서버의 `helm` CLI를 직접 호출. PATH에 helm 필요
-- **Prometheus DNS**: Java(Netty)는 macOS `/etc/resolver` 무시 → `/etc/hosts` 등록 필수
-- **SnakeYAML 파싱**: bitnami 대형 차트 128MB 제한 설정 적용 완료
-- **bitnami 이미지 유료화**: 2025-08부터 Docker Hub bitnami 이미지 무료 중단. ChartMuseum에 차트는 있지만 이미지 pull 불가
-- **GPU limit + Docker Desktop**: 실제 GPU 없으므로 `nvidia.com/gpu` 리소스 요청 시 Pending
-
----
-
-## 11. 시연 플로우
-
-1. 로그인 (admin/1234) → 모니터링 대시보드
-2. GPU 현황 (4개 GPU, 활용률 ~50%)
-3. 카탈로그 → gpu-jupyter 배포
-4. 보안 검사 → 비용 추정 (2분, 40원) → 배포
-5. http://gpu-jupyter-demo.aipaas 접속
-6. 2분 대기 → 비용 최적화에서 초과 경고 확인
-7. 헬름 릴리즈 → 삭제
-8. 비용 최적화 → 일/월 비용
-9. 감사 로그 → K8s 이벤트
-
----
-
-## 12. 접속 정보 요약
-
-| 항목 | URL |
-|------|-----|
-| 백엔드 API | http://localhost:8888/api/v1 |
-| Swagger UI | http://localhost:8888/api/v1/docs |
-| Prometheus | http://prometheus.aipaas |
-| AlertManager | http://alertmanager.aipaas |
-| ChartMuseum | http://localhost:8880 |
-| MariaDB | localhost:13306 (root/yourP@ssW0rds) |
-| 포털 | http://localhost:5173 (admin/1234) |
-| 배포 서비스 | http://<릴리즈명>.aipaas |
+1. **DNS 설정**: 내부 DNS에 `*.aipaas -> 192.168.201.171` 와일드카드 레코드 추가하면 짧은 URL 사용 가능
+2. **OIDC 인증 복원**: ClusterEntity에 OIDC 필드 준비됨 (`oidc_issuer_url`, `oidc_client_id` 등). 토큰 자동 갱신 로직 구현 필요
+3. **GPU 노드 확장**: 추가 GPU 노드 연결 시 GPU Operator가 자동으로 Driver/DCGM 설치
+4. **nvidia-smi exporter**: DCGM 대비 더 상세한 메트릭(팬 속도 등)을 원하면 추가 설치 가능
+5. **이벤트 페이지 전체 네임스페이스**: 백엔드 API에 전체 네임스페이스 조회 기능 추가 필요

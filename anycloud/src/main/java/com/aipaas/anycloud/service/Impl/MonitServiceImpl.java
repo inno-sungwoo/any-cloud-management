@@ -342,37 +342,37 @@ public class MonitServiceImpl implements MonitService {
 	public Object monitoringGpuStatus(String clusterName) {
 		String monitUrl = getMonitUrl(clusterName);
 
-		// GPU 카드별 정보 수집 (UUID 기준)
+		// GPU 카드별 정보 수집 — DCGM Exporter의 DCGM_FI_DEV_GPU_UTIL을 기준으로 UUID 목록 확보
 		List<Map<String, Object>> gpuList = new ArrayList<>();
-		JsonNode gpuInfoResult = executeQueryRaw(monitUrl, "query", "nvidia_smi_gpu_info", null);
+		JsonNode gpuInfoResult = executeQueryRaw(monitUrl, "query", "DCGM_FI_DEV_GPU_UTIL", null);
 		if (gpuInfoResult.isArray()) {
 			for (JsonNode node : gpuInfoResult) {
 				JsonNode m = node.get("metric");
-				String uuid = m.path("uuid").asText("");
+				String uuid = m.path("UUID").asText("");
 				Map<String, Object> gpu = new LinkedHashMap<>();
 				gpu.put("uuid", uuid);
-				gpu.put("name", m.path("name").asText(""));
-				gpu.put("driverVersion", m.path("driver_version").asText(""));
+				gpu.put("name", m.path("modelName").asText(""));
+				gpu.put("driverVersion", m.path("DCGM_FI_DRIVER_VERSION").asText(""));
 				gpuList.add(gpu);
 			}
 		}
 
-		// 각 GPU UUID별 실시간 메트릭 수집
+		// 각 GPU UUID별 실시간 메트릭 수집 (DCGM 메트릭)
 		Map<String, String> metricQueries = new LinkedHashMap<>();
-		metricQueries.put("utilization", "nvidia_smi_utilization_gpu_ratio * 100");
-		metricQueries.put("memoryUtilization", "nvidia_smi_utilization_memory_ratio * 100");
-		metricQueries.put("temperature", "nvidia_smi_temperature_gpu");
-		metricQueries.put("powerDraw", "nvidia_smi_power_draw_watts");
-		metricQueries.put("vramUsedMb", "nvidia_smi_memory_used_bytes / 1048576");
-		metricQueries.put("vramTotalMb", "nvidia_smi_memory_total_bytes / 1048576");
-		metricQueries.put("fanSpeed", "nvidia_smi_fan_speed_ratio * 100");
+		metricQueries.put("utilization", "DCGM_FI_DEV_GPU_UTIL");
+		metricQueries.put("memoryUtilization", "DCGM_FI_DEV_MEM_COPY_UTIL");
+		metricQueries.put("temperature", "DCGM_FI_DEV_GPU_TEMP");
+		metricQueries.put("powerDraw", "DCGM_FI_DEV_POWER_USAGE");
+		metricQueries.put("vramUsedMb", "DCGM_FI_DEV_FB_USED");
+		metricQueries.put("vramTotalMb", "(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE)");
+		metricQueries.put("fanSpeed", "DCGM_FI_DEV_FAN_SPEED");
 
 		Map<String, Map<String, Double>> metricsByUuid = new HashMap<>();
 		for (Map.Entry<String, String> entry : metricQueries.entrySet()) {
 			JsonNode metricResult = executeQueryRaw(monitUrl, "query", entry.getValue(), null);
 			if (metricResult.isArray()) {
 				for (JsonNode node : metricResult) {
-					String uuid = node.path("metric").path("uuid").asText("");
+					String uuid = node.path("metric").path("UUID").asText("");
 					double value = node.path("value").get(1).asDouble(0.0);
 					metricsByUuid.computeIfAbsent(uuid, k -> new HashMap<>())
 							.put(entry.getKey(), value);
@@ -391,6 +391,36 @@ public class MonitServiceImpl implements MonitService {
 			gpu.put("vramUsedMb", metrics.getOrDefault("vramUsedMb", 0.0));
 			gpu.put("vramTotalMb", metrics.getOrDefault("vramTotalMb", 0.0));
 			gpu.put("fanSpeed", metrics.getOrDefault("fanSpeed", 0.0));
+		}
+
+		// nvidia_smi exporter가 없는 경우 kube GPU 리소스 요청 정보로 fallback
+		if (gpuList.isEmpty()) {
+			log.info("No nvidia_smi metrics found, falling back to kube GPU resource requests");
+			JsonNode gpuRequestResult = executeQueryRaw(monitUrl, "query",
+					"kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"}", null);
+			if (gpuRequestResult.isArray()) {
+				int idx = 0;
+				for (JsonNode node : gpuRequestResult) {
+					JsonNode m = node.get("metric");
+					double gpuCount = node.path("value").get(1).asDouble(0.0);
+					Map<String, Object> gpu = new LinkedHashMap<>();
+					gpu.put("uuid", "gpu-alloc-" + idx++);
+					gpu.put("name", "GPU (할당 정보)");
+					gpu.put("driverVersion", "-");
+					gpu.put("utilization", 0.0);
+					gpu.put("memoryUtilization", 0.0);
+					gpu.put("temperature", 0.0);
+					gpu.put("powerDraw", 0.0);
+					gpu.put("vramUsedMb", 0.0);
+					gpu.put("vramTotalMb", 0.0);
+					gpu.put("fanSpeed", 0.0);
+					gpu.put("allocatedGpu", gpuCount);
+					gpu.put("namespace", m.path("namespace").asText(""));
+					gpu.put("pod", m.path("pod").asText(""));
+					gpu.put("node", m.path("node").asText(""));
+					gpuList.add(gpu);
+				}
+			}
 		}
 
 		return gpuList;

@@ -9,6 +9,7 @@ import com.aipaas.anycloud.model.entity.ClusterEntity;
 import com.aipaas.anycloud.model.entity.HelmRepoEntity;
 import com.aipaas.anycloud.service.ChartService;
 import com.aipaas.anycloud.service.ClusterService;
+import com.aipaas.anycloud.service.CostService;
 import com.aipaas.anycloud.service.HelmRepoService;
 import com.aipaas.anycloud.service.util.HelmCommandExecutor;
 import com.aipaas.anycloud.service.util.HelmReleaseScanner;
@@ -49,6 +50,7 @@ public class ChartServiceImpl implements ChartService {
 
     private final HelmRepoService helmRepoService;
     private final ClusterService clusterService;
+    private final CostService costService;
 
     private final RestTemplate restTemplate;
     private final HelmCommandExecutor helmCommandExecutor;
@@ -431,9 +433,17 @@ public class ChartServiceImpl implements ChartService {
             // kubeconfig 삭제
             java.nio.file.Files.deleteIfExists(tempKubeconfig);
 
+            // GPU ��약도 함께 삭제
+            try {
+                costService.deleteReservation(releaseName, clusterId);
+                log.info("Deleted GPU reservation for release: {}", releaseName);
+            } catch (Exception ex) {
+                log.warn("No GPU reservation found for release: {} (or already deleted): {}", releaseName, ex.getMessage());
+            }
+
             return ChartDeployResponseDto.builder()
                     .success(true)
-                    .message("릴리즈 '" + releaseName + "'이(가) 삭제되었습니다.")
+                    .message("릴리즈 '" + releaseName + "'이(가) 삭제되었습니���.")
                     .build();
 
         } catch (Exception e) {

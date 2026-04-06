@@ -13,7 +13,7 @@ prometheus:
             "instance",
             "(.*):[0-9]+"
           )
-          * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+          * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
         )
       usage_namespace: |
         sum by (namespace) (
@@ -35,7 +35,7 @@ prometheus:
               "(.*):[0-9]+"
             )
           )
-          * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+          * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
         )
     memory:
       total: "sum(kube_node_status_capacity{resource=\"memory\", ${NODE_FILTER} })"
@@ -61,7 +61,7 @@ prometheus:
                  "(.*):[0-9]+"
                )
              )
-             * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+             * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
            ) 
       usage: |
         sum by(node) (
@@ -74,7 +74,7 @@ prometheus:
                       "(.*):[0-9]+"
                     )
                   )
-                  * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+                  * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
                 ) 
       usage_namespace: "sum by(namespace) (kubelet_volume_stats_used_bytes {}) "
     disk:
@@ -89,7 +89,7 @@ prometheus:
               "(.*):[0-9]+"
             )
           )
-          * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+          * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
         )
       write_bytes: |
         sum by (node) (
@@ -102,7 +102,7 @@ prometheus:
               "(.*):[0-9]+"
             )
           )
-          * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+          * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
         ) 
     network:
       receive_bytes: |
@@ -116,7 +116,7 @@ prometheus:
               "(.*):[0-9]+"
             )
           )
-          * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+          * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
         )
       transmit_bytes : |  
         sum by (node) (
@@ -129,7 +129,7 @@ prometheus:
               "(.*):[0-9]+"
             )
           )
-          * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+          * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
         )
       receive_drop : |   
           sum by (node) (
@@ -142,7 +142,7 @@ prometheus:
               "(.*):[0-9]+"
             )
           )
-          * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+          * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
           )
       transmit_drop: |
         sum by (node) (
@@ -155,7 +155,7 @@ prometheus:
               "(.*):[0-9]+"
             )
           )
-          * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+          * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
         )
       receive_err: |
         sum by (node) (
@@ -168,7 +168,7 @@ prometheus:
               "(.*):[0-9]+"
             )
           )
-          * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+          * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
         )
       transmit_err: |
         sum by (node) (
@@ -181,7 +181,7 @@ prometheus:
               "(.*):[0-9]+"
             )
           )
-          * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+          * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
         )
     gpu:
       total: "gpu_operator_gpu_nodes_total"
@@ -192,12 +192,12 @@ prometheus:
           (kube_pod_status_phase{phase!="Pending", job="kube-state-metrics"} == 1)
       request: "sum by(node) (kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\",${NODE_FILTER},${NAMESPACE_FILTER} })"
       limit: "sum by(node) (kube_pod_container_resource_limits{resource=\"nvidia_com_gpu\",${NODE_FILTER},${NAMESPACE_FILTER} })"
-      util: "nvidia_smi_utilization_gpu_ratio * 100"
-      memory_copy_util: "nvidia_smi_utilization_memory_ratio * 100"
-      memory_used: "nvidia_smi_memory_used_bytes / 1048576"
-      memory_total: "nvidia_smi_memory_total_bytes / 1048576"
-      temperature: "nvidia_smi_temperature_gpu"
-      power_draw: "nvidia_smi_power_draw_watts"
+      util: "DCGM_FI_DEV_GPU_UTIL"
+      memory_copy_util: "DCGM_FI_DEV_MEM_COPY_UTIL"
+      memory_used: "DCGM_FI_DEV_FB_USED"
+      memory_total: "(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE)"
+      temperature: "DCGM_FI_DEV_GPU_TEMP"
+      power_draw: "DCGM_FI_DEV_POWER_USAGE"
     pod:
       total: "sum(kube_node_status_capacity{resource=\"pods\", ${NODE_FILTER} })"
       used_node: "kubelet_running_pods{${NODE_FILTER}}"
@@ -217,7 +217,7 @@ prometheus:
                         "(.*):[0-9]+"
                       )
                     )
-                    * on(internal_ip) group_left(node) kube_node_info{${NODE_FILTER}}
+                    * on(internal_ip) group_left(node) (max by (internal_ip, node) (kube_node_info{${NODE_FILTER}}))
                   ) 
       pod: "topk(5, count(kube_pod_info{${NODE_FILTER},${NAMESPACE_FILTER}}) by (node)) by (node)"
       gpu: "topk(5, sum by (node) (kube_pod_container_resource_requests{resource='nvidia_com_gpu',${NODE_FILTER},${NAMESPACE_FILTER}})) by (node)"
@@ -233,8 +233,8 @@ prometheus:
       capacity_total: "gke_tpu_node_capacity{${NODE_FILTER}}"
     monitoring:
       helm_releases: "count(helm_chart_info{description!~\".*failed.*\"}) or vector(0)"
-      gpu_count: "count(nvidia_smi_gpu_info) or vector(0)"
-      gpu_avg_util: "avg(nvidia_smi_utilization_gpu_ratio) * 100 or vector(0)"
+      gpu_count: "count(DCGM_FI_DEV_GPU_UTIL) or vector(0)"
+      gpu_avg_util: "avg(DCGM_FI_DEV_GPU_UTIL) or vector(0)"
       active_alerts: "count(ALERTS{alertstate=\"firing\"}) or vector(0)"
       release_status: |
         helm_chart_info{description!~".*failed.*"}

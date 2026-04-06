@@ -80,6 +80,26 @@ public class ClusterEntity implements Serializable {
 	@Column(name = "client_token", columnDefinition = "MEDIUMTEXT")
 	private String clientToken;
 
+	@Size(max = 20)
+	@Column(name = "auth_type", length = 20)
+	@Builder.Default
+	private String authType = "token";
+
+	@Size(max = 255)
+	@Column(name = "oidc_issuer_url")
+	private String oidcIssuerUrl;
+
+	@Size(max = 100)
+	@Column(name = "oidc_client_id", length = 100)
+	private String oidcClientId;
+
+	@Size(max = 255)
+	@Column(name = "oidc_client_secret")
+	private String oidcClientSecret;
+
+	@Column(name = "oidc_refresh_token", columnDefinition = "MEDIUMTEXT")
+	private String oidcRefreshToken;
+
 	@Size(max = 100)
 	@Column(name = "monit_server_url",  length = 100)
 	private String monitServerUrl;
