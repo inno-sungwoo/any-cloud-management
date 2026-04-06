@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-smi-exporter
+  namespace: ai-pass3
+  labels:
+    app: nvidia-smi-exporter
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-smi-exporter
+  template:
+    metadata:
+      labels:
+        app: nvidia-smi-exporter
+    spec:
+      tolerations:
+        - operator: Exists
+      runtimeClassName: nvidia
+      containers:
+        - name: nvidia-smi-exporter
+          image: utkuozdemir/nvidia_gpu_exporter:1.3.0
+          ports:
+            - containerPort: 9835
+              name: metrics
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            privileged: true
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvidia-smi-exporter
+  namespace: ai-pass3
+  labels:
+    app: nvidia-smi-exporter
+spec:
+  selector:
+    app: nvidia-smi-exporter
+  ports:
+    - port: 9835
+      targetPort: 9835
+      name: metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nvidia-smi-exporter
+  namespace: ai-pass3
+  labels:
+    release: ai-pass3-prom
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-smi-exporter
+  endpoints:
+    - port: metrics
+      interval: 15s

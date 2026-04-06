@@ -1,0 +1,31 @@
+# DCGM Exporter - Consumer GPU (RTX 3060) 호환 설정
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: ai-pass3-prom
+
+tolerations:
+  - operator: Exists
+
+# Consumer GPU용 커스텀 counters 사용
+extraVolumes:
+  - name: dcgm-counters
+    configMap:
+      name: dcgm-counters
+
+extraVolumeMounts:
+  - name: dcgm-counters
+    mountPath: /etc/dcgm-exporter
+    readOnly: true
+
+arguments:
+  - "-f"
+  - "/etc/dcgm-exporter/default-counters.csv"
+  - "--kubernetes"
+  - "--collect-interval"
+  - "5000"
+
+securityContext:
+  capabilities:
+    add:
+      - SYS_ADMIN
