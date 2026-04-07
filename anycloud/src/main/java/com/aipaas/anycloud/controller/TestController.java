@@ -1,5 +1,6 @@
 package com.aipaas.anycloud.controller;
 
+import com.aipaas.anycloud.configuration.bean.KubeconfigProvider;
 import com.aipaas.anycloud.configuration.bean.KubernetesClientConfig;
 import com.aipaas.anycloud.model.entity.ClusterEntity;
 import com.aipaas.anycloud.repository.ClusterRepository;
@@ -25,6 +26,7 @@ import java.util.Map;
 public class TestController {
 
     private final ClusterRepository clusterRepository;
+    private final KubeconfigProvider kubeconfigProvider;
 
     @PostMapping("/kubeconfig-client")
     public ResponseEntity<?> testKubeconfigClient(@RequestParam String clusterId) {
@@ -51,7 +53,7 @@ public class TestController {
             log.info("  - Has ServerCa: {}", cluster.getServerCa() != null && !cluster.getServerCa().trim().isEmpty());
             
             
-            KubernetesClientConfig kubernetesClientConfig = new KubernetesClientConfig(cluster);
+            KubernetesClientConfig kubernetesClientConfig = new KubernetesClientConfig(cluster, kubeconfigProvider.resolvePath());
             KubernetesClient client = kubernetesClientConfig.getClient();
             // // 🔍 인증서 데이터 상세 분석
             // if (cluster.getClientCa() != null) {
@@ -206,23 +208,4 @@ public class TestController {
         return new ResponseEntity<>(result, new HttpHeaders(), HttpStatus.OK);
     }
 
-    @GetMapping("/kubeconfig/{clusterId}")
-    public ResponseEntity<String> generateKubeconfig(@PathVariable String clusterId) {
-        try {
-            ClusterEntity cluster = clusterRepository.findById(clusterId)
-                    .orElseThrow(() -> new RuntimeException("Cluster not found: " + clusterId));
-
-            // kubeconfig 생성
-            String kubeconfigContent = KubernetesClientConfig.createKubeconfigContent(cluster);
-
-            return ResponseEntity.ok()
-                    .header("Content-Type", "application/x-yaml")
-                    .header("Content-Disposition", "attachment; filename=" + clusterId + "-kubeconfig.yaml")
-                    .body(kubeconfigContent);
-
-        } catch (Exception e) {
-            return ResponseEntity.status(500)
-                    .body("Error generating kubeconfig: " + e.getMessage());
-        }
-    }
 }

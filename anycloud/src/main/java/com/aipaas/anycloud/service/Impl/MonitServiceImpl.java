@@ -1,6 +1,9 @@
 package com.aipaas.anycloud.service.Impl;
 
+import com.aipaas.anycloud.configuration.bean.KubeconfigProvider;
+import com.aipaas.anycloud.configuration.bean.KubernetesClientConfig;
 import com.aipaas.anycloud.error.exception.EntityNotFoundException;
+import io.fabric8.kubernetes.client.KubernetesClient;
 import com.aipaas.anycloud.model.dto.response.AlertDto;
 import com.aipaas.anycloud.model.dto.response.MonitoringSummaryDto;
 import com.aipaas.anycloud.model.dto.response.ReleaseStatusDto;
@@ -34,6 +37,7 @@ public class MonitServiceImpl implements MonitService {
 
 	private final ObjectMapper objectMapper;
 	private final ClusterRepository clusterRepository;
+	private final KubeconfigProvider kubeconfigProvider;
 	private final WebClient webClient;
 	private final PrometheusQueryService prometheusQueryService;
 
@@ -41,10 +45,23 @@ public class MonitServiceImpl implements MonitService {
 		ClusterEntity cluster = clusterRepository.findById(clusterName).orElseThrow(
 				() -> new EntityNotFoundException("Cluster with Name " + clusterName + " Not Found."));
 		String monitUrl = cluster.getMonitServerUrl();
-		if (monitUrl == null || monitUrl.isEmpty()) {
-			throw new EntityNotFoundException("Monitoring Url Not Found for cluster: " + clusterName);
+		// 1. URL이 비어있거나 placeholder인 경우 → 503
+		if (monitUrl == null || monitUrl.isBlank() || monitUrl.contains("@@")
+				|| !(monitUrl.startsWith("http://") || monitUrl.startsWith("https://"))) {
+			throw new org.springframework.web.server.ResponseStatusException(
+					org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+					"Cluster '" + clusterName + "' has no valid monitoring endpoint configured");
 		}
-		log.info("Using monitUrl: {} for cluster: {}", monitUrl, clusterName);
+		// 2. 헬스체커가 UNREACHABLE로 마킹한 경우 → 503 (백엔드가 hang하지 않도록 즉시 차단)
+		String status = cluster.getMonitStatus();
+		if (status != null && !"ACTIVE".equals(status)) {
+			throw new org.springframework.web.server.ResponseStatusException(
+					org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+					"Cluster '" + clusterName + "' monitoring is " + status
+							+ (cluster.getMonitLastError() != null
+									? ": " + cluster.getMonitLastError() : ""));
+		}
+		log.debug("Using monitUrl: {} for cluster: {}", monitUrl, clusterName);
 		return monitUrl;
 	}
 
@@ -398,29 +415,80 @@ public class MonitServiceImpl implements MonitService {
 			log.info("No nvidia_smi metrics found, falling back to kube GPU resource requests");
 			JsonNode gpuRequestResult = executeQueryRaw(monitUrl, "query",
 					"kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"}", null);
+			// 여러 kube-state-metrics 인스턴스가 동일 pod를 노출할 수 있으므로 namespace+pod 기준 dedupe
+			Map<String, Map<String, Object>> dedup = new LinkedHashMap<>();
 			if (gpuRequestResult.isArray()) {
-				int idx = 0;
 				for (JsonNode node : gpuRequestResult) {
 					JsonNode m = node.get("metric");
+					String ns = m.path("namespace").asText("");
+					String pod = m.path("pod").asText("");
+					String nodeName = m.path("node").asText("");
 					double gpuCount = node.path("value").get(1).asDouble(0.0);
-					Map<String, Object> gpu = new LinkedHashMap<>();
-					gpu.put("uuid", "gpu-alloc-" + idx++);
-					gpu.put("name", "GPU (할당 정보)");
-					gpu.put("driverVersion", "-");
-					gpu.put("utilization", 0.0);
-					gpu.put("memoryUtilization", 0.0);
-					gpu.put("temperature", 0.0);
-					gpu.put("powerDraw", 0.0);
-					gpu.put("vramUsedMb", 0.0);
-					gpu.put("vramTotalMb", 0.0);
-					gpu.put("fanSpeed", 0.0);
-					gpu.put("allocatedGpu", gpuCount);
-					gpu.put("namespace", m.path("namespace").asText(""));
-					gpu.put("pod", m.path("pod").asText(""));
-					gpu.put("node", m.path("node").asText(""));
-					gpuList.add(gpu);
+					String key = ns + "/" + pod;
+					Map<String, Object> gpu = dedup.get(key);
+					if (gpu == null) {
+						gpu = new LinkedHashMap<>();
+						gpu.put("uuid", "gpu-alloc-" + dedup.size());
+						gpu.put("name", "GPU (할당 정보)");
+						gpu.put("driverVersion", "-");
+						gpu.put("utilization", 0.0);
+						gpu.put("memoryUtilization", 0.0);
+						gpu.put("temperature", 0.0);
+						gpu.put("powerDraw", 0.0);
+						gpu.put("vramUsedMb", 0.0);
+						gpu.put("vramTotalMb", 0.0);
+						gpu.put("fanSpeed", 0.0);
+						gpu.put("allocatedGpu", gpuCount);
+						gpu.put("namespace", ns);
+						gpu.put("pod", pod);
+						gpu.put("node", nodeName);
+						dedup.put(key, gpu);
+					} else if (!nodeName.isEmpty() && ((String) gpu.get("node")).isEmpty()) {
+						gpu.put("node", nodeName);
+					}
 				}
 			}
+			// fabric8 client로 모든 GPU pod의 node/상태(phase) 정보를 보강
+			// Prometheus TSDB에는 삭제된 pod의 stale 메트릭이 남아있을 수 있으므로,
+			// 클러스터에 실제로 존재하지 않는 pod는 결과에서 제외한다.
+			if (!dedup.isEmpty()) {
+				KubernetesClientConfig mgr = null;
+				try {
+					mgr = new KubernetesClientConfig(
+							clusterRepository.findById(clusterName).orElseThrow(),
+							kubeconfigProvider.resolvePath());
+					KubernetesClient k8s = mgr.getClient();
+					Iterator<Map.Entry<String, Map<String, Object>>> it = dedup.entrySet().iterator();
+					while (it.hasNext()) {
+						Map<String, Object> gpu = it.next().getValue();
+						try {
+							var podObj = k8s.pods()
+									.inNamespace((String) gpu.get("namespace"))
+									.withName((String) gpu.get("pod"))
+									.get();
+							if (podObj == null) {
+								// stale 메트릭 — 실제 pod 없음
+								it.remove();
+								continue;
+							}
+							if (podObj.getSpec() != null && podObj.getSpec().getNodeName() != null) {
+								gpu.put("node", podObj.getSpec().getNodeName());
+							}
+							if (podObj.getStatus() != null && podObj.getStatus().getPhase() != null) {
+								gpu.put("phase", podObj.getStatus().getPhase());
+							}
+						} catch (Exception e) {
+							log.debug("Failed to fetch pod info for {}/{}: {}",
+									gpu.get("namespace"), gpu.get("pod"), e.getMessage());
+						}
+					}
+				} catch (Exception e) {
+					log.warn("Failed to enrich GPU pod info via Kubernetes API: {}", e.getMessage());
+				} finally {
+					if (mgr != null) mgr.closeClient();
+				}
+			}
+			gpuList.addAll(dedup.values());
 		}
 
 		return gpuList;
@@ -476,22 +544,19 @@ public class MonitServiceImpl implements MonitService {
 					.uri(uri)
 					.retrieve()
 					.bodyToMono(String.class)
+					.timeout(java.time.Duration.ofSeconds(5))
+					.retry(1)
 					.block();
 
 			JsonNode rootNode = objectMapper.readTree(responseBody);
 			log.debug("responseBody : {} ", responseBody);
-			JsonNode resultArray = rootNode.path("data").path("result");
-
-			// if (resultArray.isArray() && resultArray.size() > 0) {
-			// 	return resultArray;
-			// }
-
-			return resultArray;
-			// throw new IllegalStateException("No valid data in Prometheus response");
+			return rootNode.path("data").path("result");
 
 		} catch (Exception e) {
-			log.error("Failed to execute Prometheus query: {}", e.getMessage(), e);
-			throw new RuntimeException("Prometheus query failed", e);
+			log.warn("Prometheus query failed (returning empty result): {} - {}",
+					query, e.getMessage());
+			// 부분 실패 허용: 전체 응답이 깨지지 않도록 빈 배열 반환
+			return objectMapper.createArrayNode();
 		}
 	}
 

@@ -233,8 +233,8 @@ prometheus:
       capacity_total: "gke_tpu_node_capacity{${NODE_FILTER}}"
     monitoring:
       helm_releases: "count(helm_chart_info{description!~\".*failed.*\"}) or vector(0)"
-      gpu_count: "count(DCGM_FI_DEV_GPU_UTIL) or vector(0)"
-      gpu_avg_util: "avg(DCGM_FI_DEV_GPU_UTIL) or vector(0)"
+      gpu_count: "count(DCGM_FI_DEV_GPU_UTIL) or count(nvidia_smi_gpu_info) or sum(kube_node_status_capacity{resource=\"nvidia_com_gpu\"}) or vector(0)"
+      gpu_avg_util: "avg(DCGM_FI_DEV_GPU_UTIL) or (avg(nvidia_smi_utilization_gpu_ratio) * 100) or clamp_max((sum(kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"}) / sum(kube_node_status_capacity{resource=\"nvidia_com_gpu\"})) * 100, 100) or vector(0)"
       active_alerts: "count(ALERTS{alertstate=\"firing\"}) or vector(0)"
       release_status: |
         helm_chart_info{description!~".*failed.*"}

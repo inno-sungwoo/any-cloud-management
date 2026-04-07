@@ -64,3 +64,4 @@ bin/
 
 ### etc ###
 .uuid
+chartmuseum_data/

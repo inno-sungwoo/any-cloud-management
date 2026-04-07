@@ -4,19 +4,24 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import org.springframework.stereotype.Component;
+import com.aipaas.anycloud.configuration.bean.KubeconfigProvider;
 import com.aipaas.anycloud.configuration.bean.KubernetesClientConfig;
 import com.aipaas.anycloud.model.entity.ClusterEntity;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class HelmReleaseScanner {
+
+  private final KubeconfigProvider kubeconfigProvider;
 
   public List<HasMetadata> scanReleaseResources(ClusterEntity cluster, String namespace, String releaseName) {
 
-    KubernetesClientConfig manager = new KubernetesClientConfig(cluster);
+    KubernetesClientConfig manager = new KubernetesClientConfig(cluster, kubeconfigProvider.resolvePath());
     KubernetesClient client = manager.getClient();
     List<HasMetadata> results = new ArrayList<>();
 

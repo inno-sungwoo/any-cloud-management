@@ -1,5 +1,6 @@
 package com.aipaas.anycloud.service.Impl;
 
+import com.aipaas.anycloud.configuration.bean.KubeconfigProvider;
 import com.aipaas.anycloud.configuration.bean.KubernetesClientConfig;
 import com.aipaas.anycloud.error.exception.HelmChartNotFoundException;
 import com.aipaas.anycloud.error.exception.HelmDeploymentException;
@@ -26,23 +27,12 @@ import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.client.KubernetesClient;
 
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Base64;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * <pre>
- * ClassName : ChartServiceImpl
- * Type : class
- * Description : Helm 차트 관련 기능을 구현한 서비스 클래스입니다.
- * Related : ChartService, ChartController
- * </pre>
- */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -51,6 +41,7 @@ public class ChartServiceImpl implements ChartService {
     private final HelmRepoService helmRepoService;
     private final ClusterService clusterService;
     private final CostService costService;
+    private final KubeconfigProvider kubeconfigProvider;
 
     private final RestTemplate restTemplate;
     private final HelmCommandExecutor helmCommandExecutor;
@@ -66,7 +57,6 @@ public class ChartServiceImpl implements ChartService {
         HelmRepoEntity repository = getRepository(repositoryName);
 
         try {
-            // Helm repository의 index.yaml을 다운로드하여 파싱
             String indexUrl = repository.getUrl().endsWith("/") ? repository.getUrl() + "index.yaml"
                     : repository.getUrl() + "/index.yaml";
 
@@ -111,7 +101,6 @@ public class ChartServiceImpl implements ChartService {
         HelmRepoEntity repository = getRepository(repositoryName);
 
         try {
-            // Helm repository의 index.yaml을 다운로드하여 파싱
             String indexUrl = repository.getUrl().endsWith("/") ? repository.getUrl() + "index.yaml"
                     : repository.getUrl() + "/index.yaml";
 
@@ -156,7 +145,6 @@ public class ChartServiceImpl implements ChartService {
         HelmRepoEntity repository = getRepository(repositoryName);
 
         try {
-            // Helm CLI를 사용하여 values.yaml 조회
             String command = helmCommandExecutor.buildHelmShowCommand("values", repository, chartName, version);
             String valuesContent = helmCommandExecutor.executeHelmCommandWithoutKubeconfig(command);
 
@@ -180,7 +168,6 @@ public class ChartServiceImpl implements ChartService {
         HelmRepoEntity repository = getRepository(repositoryName);
 
         try {
-            // Helm CLI를 사용하여 README.md 조회
             String command = helmCommandExecutor.buildHelmShowCommand("readme", repository, chartName, version);
             String readmeContent = helmCommandExecutor.executeHelmCommandWithoutKubeconfig(command);
 
@@ -206,27 +193,24 @@ public class ChartServiceImpl implements ChartService {
         HelmRepoEntity repository = getRepository(repositoryName);
         ClusterEntity cluster = getCluster(clusterId);
 
-        // kubeconfig 파일 생성 및 Kubernetes 클러스터 응답 테스트
         try {
             String testKubeconfigPath = createKubeconfigFile(cluster);
 
             try {
-                KubernetesClientConfig manager = new KubernetesClientConfig(cluster);
+                KubernetesClientConfig manager = new KubernetesClientConfig(cluster, kubeconfigProvider.resolvePath());
                 KubernetesClient client = manager.getClient();
                 client.getApiVersion();
 
-                // 전체 배포 사전 검증 수행
                 chartValidator.validateBeforeDeployment(repositoryName, chartName, releaseName,
                         clusterId, namespace, cluster.getVersion(), testKubeconfigPath, repository);
 
-                // Dry-run 검증 수행
                 String dryRunCommand = helmCommandExecutor.buildHelmDryRunCommand(repository, chartName, releaseName,
                         namespace, version, valuesFile, testKubeconfigPath);
                 String dryRunResult = helmCommandExecutor.executeHelmCommand(dryRunCommand, testKubeconfigPath);
                 log.info("Dry-run completed successfully for release: {}", releaseName);
 
             } finally {
-                deleteKubeconfigFile(testKubeconfigPath); // 테스트 후 즉시 삭제
+                deleteKubeconfigFile(testKubeconfigPath);
             }
 
         } catch (Exception e) {
@@ -235,7 +219,6 @@ public class ChartServiceImpl implements ChartService {
                     "Cannot connect to cluster: " + clusterId + ". Error: " + e.getMessage());
         }
 
-        // 동기 배포 실행 — 결과를 클라이언트에 즉시 반환
         try {
             String kubeconfigPath = createKubeconfigFile(cluster);
             try {
@@ -266,16 +249,13 @@ public class ChartServiceImpl implements ChartService {
         String targetNamespace = namespace != null ? namespace : "default";
 
         try {
-            // kubeconfig 파일 생성
             String kubeconfigPath = createKubeconfigFile(cluster);
 
             try {
-                // Helm CLI를 사용하여 릴리즈 상태 조회
                 String command = helmCommandExecutor.buildHelmStatusCommand(releaseName, targetNamespace,
                         kubeconfigPath);
                 String output = helmCommandExecutor.executeHelmCommand(command, kubeconfigPath);
 
-                // Helm 상태 출력 파싱
                 String status = chartParser.parseHelmStatusOutput(output);
 
                 return ChartDeployResponseDto.builder()
@@ -284,7 +264,6 @@ public class ChartServiceImpl implements ChartService {
                         .build();
 
             } finally {
-                // 임시 kubeconfig 파일 삭제
                 deleteKubeconfigFile(kubeconfigPath);
             }
 
@@ -313,43 +292,18 @@ public class ChartServiceImpl implements ChartService {
     }
 
     /**
-     * 클러스터 정보를 기반으로 임시 kubeconfig 파일을 생성합니다.
+     * 외부 kubeconfig 경로를 그대로 반환한다. DB 기반 임시파일 생성 분기는 제거되었습니다.
      */
     private String createKubeconfigFile(ClusterEntity cluster) throws IOException {
-        try {
-            // KubernetesClientConfig의 createKubeconfigContent 메서드 사용 (중복 제거)
-            String kubeconfigContent = KubernetesClientConfig.createKubeconfigContent(cluster);
-
-            // 임시 파일 생성
-            String tempDir = System.getProperty("java.io.tmpdir");
-            String fileName = "kubeconfig_" + cluster.getId() + "_" + System.currentTimeMillis() + ".yaml";
-            Path kubeconfigPath = Paths.get(tempDir, fileName);
-
-            Files.write(kubeconfigPath, kubeconfigContent.getBytes(StandardCharsets.UTF_8));
-
-            log.debug("Created temporary kubeconfig file: {}", kubeconfigPath.toString());
-            return kubeconfigPath.toString();
-
-        } catch (Exception e) {
-            log.error("Failed to create kubeconfig file for cluster: {}", cluster.getId(), e);
-            throw new IOException("Failed to create kubeconfig for cluster " + cluster.getId() + ": " + e.getMessage(),
-                    e);
+        String configuredPath = kubeconfigProvider.resolvePath();
+        if (configuredPath == null) {
+            throw new IOException("kubeconfig path is not configured (cluster: " + cluster.getId() + ")");
         }
+        return configuredPath;
     }
 
-    /**
-     * 임시 kubeconfig 파일을 삭제합니다.
-     */
     private void deleteKubeconfigFile(String kubeconfigPath) {
-        try {
-            Path path = Paths.get(kubeconfigPath);
-            if (Files.exists(path)) {
-                Files.delete(path);
-                log.debug("Deleted temporary kubeconfig file: {}", kubeconfigPath);
-            }
-        } catch (IOException e) {
-            log.warn("Failed to delete temporary kubeconfig file: {}", kubeconfigPath, e);
-        }
+        // 외부 kubeconfig만 사용하므로 삭제할 임시파일이 없습니다.
     }
 
     private HttpHeaders createAuthHeaders(HelmRepoEntity repository) {
@@ -371,15 +325,12 @@ public class ChartServiceImpl implements ChartService {
         try {
             ClusterEntity cluster = getCluster(clusterId);
 
-            // kubeconfig 파일 생성
             String kubeconfigPath = createKubeconfigFile(cluster);
 
             try {
-                // Helm list 명령어 실행
                 String command = helmCommandExecutor.buildHelmListCommand(namespace, kubeconfigPath);
                 String output = helmCommandExecutor.executeHelmCommand(command, kubeconfigPath);
 
-                // 출력 파싱
                 List<ChartReleasesResponseDto.ReleaseInfo> releases = chartParser.parseHelmListOutput(output);
 
                 log.info("Successfully retrieved {} releases for cluster: {}", releases.size(), clusterId);
@@ -391,7 +342,6 @@ public class ChartServiceImpl implements ChartService {
                         .build();
 
             } finally {
-                // 임시 kubeconfig 파일 삭제
                 deleteKubeconfigFile(kubeconfigPath);
             }
 
@@ -416,24 +366,16 @@ public class ChartServiceImpl implements ChartService {
         log.info("Uninstalling release: {} from cluster: {}, namespace: {}", releaseName, clusterId, namespace);
 
         ClusterEntity cluster = clusterService.getCluster(clusterId);
-        String kubeconfigPath = null;
+        String kubeconfigPath = kubeconfigProvider.resolvePath();
+        if (kubeconfigPath == null) {
+            throw new HelmDeploymentException("kubeconfig path is not configured");
+        }
 
         try {
-            String kubeconfigContent = KubernetesClientConfig.createKubeconfigContent(cluster);
-            // kubeconfig 임시 파일 생성
-            java.nio.file.Path tempKubeconfig = java.nio.file.Files.createTempFile("kubeconfig_" + clusterId + "_", ".yaml");
-            java.nio.file.Files.write(tempKubeconfig, kubeconfigContent.getBytes());
-            kubeconfigPath = tempKubeconfig.toString();
-
-            // helm uninstall 실행
             String command = helmCommandExecutor.buildHelmUninstallCommand(releaseName, namespace, kubeconfigPath);
             String output = helmCommandExecutor.executeHelmCommand(command, kubeconfigPath);
             log.info("Successfully uninstalled release: {}. Output: {}", releaseName, output);
 
-            // kubeconfig 삭제
-            java.nio.file.Files.deleteIfExists(tempKubeconfig);
-
-            // GPU ��약도 함께 삭제
             try {
                 costService.deleteReservation(releaseName, clusterId);
                 log.info("Deleted GPU reservation for release: {}", releaseName);
@@ -443,15 +385,11 @@ public class ChartServiceImpl implements ChartService {
 
             return ChartDeployResponseDto.builder()
                     .success(true)
-                    .message("릴리즈 '" + releaseName + "'이(가) 삭제되었습니���.")
+                    .message("릴리즈 '" + releaseName + "'이(가) 삭제되었습니다.")
                     .build();
 
         } catch (Exception e) {
             log.error("Failed to uninstall release: {}", releaseName, e);
-            if (kubeconfigPath != null) {
-                try { java.nio.file.Files.deleteIfExists(java.nio.file.Path.of(kubeconfigPath)); } catch (Exception ignored) {}
-            }
-            // "not found" 에러는 이미 삭제된 릴리즈 — 성공으로 처리
             String msg = e.getMessage() != null ? e.getMessage() : "";
             if (msg.contains("not found") || msg.contains("release: not found")) {
                 log.info("Release '{}' already removed from cluster", releaseName);

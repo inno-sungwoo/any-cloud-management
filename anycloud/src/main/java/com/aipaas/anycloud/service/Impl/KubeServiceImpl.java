@@ -1,5 +1,6 @@
 package com.aipaas.anycloud.service.Impl;
 
+import com.aipaas.anycloud.configuration.bean.KubeconfigProvider;
 import com.aipaas.anycloud.configuration.bean.KubernetesClientConfig;
 import com.aipaas.anycloud.error.exception.ClusterNotFoundException;
 import com.aipaas.anycloud.model.entity.ClusterEntity;
@@ -29,6 +30,7 @@ import org.springframework.stereotype.Service;
 public class KubeServiceImpl implements KubeService {
 
 	private final ClusterService clusterService;
+	private final KubeconfigProvider kubeconfigProvider;
 
 	public List<? extends HasMetadata> getResources(String clusterName, String namespace,
 			String kind) {
@@ -42,7 +44,7 @@ public class KubeServiceImpl implements KubeService {
 			ClusterEntity cluster = clusterService.getCluster(clusterName);
 			log.info("Found cluster: {}", cluster.getId());
 
-			KubernetesClientConfig manager = new KubernetesClientConfig(cluster);
+			KubernetesClientConfig manager = new KubernetesClientConfig(cluster, kubeconfigProvider.resolvePath());
 			KubernetesClient client = manager.getClient();
 			log.info("Created Kubernetes client successfully");
 
@@ -79,7 +81,7 @@ public class KubeServiceImpl implements KubeService {
 
 		try {
 			ClusterEntity cluster = clusterService.getCluster(clusterName);
-			KubernetesClientConfig manager = new KubernetesClientConfig(cluster);
+			KubernetesClientConfig manager = new KubernetesClientConfig(cluster, kubeconfigProvider.resolvePath());
 			KubernetesClient client = manager.getClient();
 
 			try {
@@ -107,7 +109,7 @@ public class KubeServiceImpl implements KubeService {
 
 		try {
 			ClusterEntity cluster = clusterService.getCluster(clusterName);
-			KubernetesClientConfig manager = new KubernetesClientConfig(cluster);
+			KubernetesClientConfig manager = new KubernetesClientConfig(cluster, kubeconfigProvider.resolvePath());
 			KubernetesClient client = manager.getClient();
 
 			try {
@@ -136,7 +138,7 @@ public class KubeServiceImpl implements KubeService {
 			ClusterEntity cluster = clusterService.getCluster(clusterName);
 			log.info("Found cluster: {}", cluster.getId());
 
-			KubernetesClientConfig manager = new KubernetesClientConfig(cluster);
+			KubernetesClientConfig manager = new KubernetesClientConfig(cluster, kubeconfigProvider.resolvePath());
 			KubernetesClient client = manager.getClient();
 			log.info("Created Kubernetes client successfully");
 

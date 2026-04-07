@@ -1,5 +1,6 @@
 package com.aipaas.anycloud.service.Impl;
 
+import com.aipaas.anycloud.configuration.bean.KubeconfigProvider;
 import com.aipaas.anycloud.configuration.bean.KubernetesClientConfig;
 import com.aipaas.anycloud.error.exception.EntityNotFoundException;
 import com.aipaas.anycloud.model.dto.response.AuditEventDto;
@@ -22,6 +23,7 @@ import java.util.List;
 public class AuditServiceImpl implements AuditService {
 
 	private final ClusterRepository clusterRepository;
+	private final KubeconfigProvider kubeconfigProvider;
 
 	@Override
 	public List<AuditEventDto> getEvents(String clusterName, String namespace) {
@@ -30,10 +32,12 @@ public class AuditServiceImpl implements AuditService {
 
 		KubernetesClientConfig manager = null;
 		try {
-			manager = new KubernetesClientConfig(cluster);
+			manager = new KubernetesClientConfig(cluster, kubeconfigProvider.resolvePath());
 			KubernetesClient client = manager.getClient();
 
-			EventList eventList = client.v1().events().inNamespace(namespace).list();
+			EventList eventList = (namespace == null || namespace.isBlank())
+					? client.v1().events().inAnyNamespace().list()
+					: client.v1().events().inNamespace(namespace).list();
 			List<AuditEventDto> events = new ArrayList<>();
 
 			for (Event event : eventList.getItems()) {

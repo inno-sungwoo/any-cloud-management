@@ -265,8 +265,8 @@ http://{릴리즈이���}.192.168.201.171.nip.io
 - `GpuStatusTable.tsx`: nvidia-smi 없으면 GPU 할당 정보 표시, GPU 없으면 안내 메시지
 
 ### 5-2. 클러스터 인증
-- OIDC 토큰(5분 만료) -> 클라이언트 인증서(1년 유효) 방식으로 전환
-- DB `cluster` 테이블에 `auth_type`, `oidc_*` 필��� 추가 (향��� OIDC 지원 대비)
+- 외부 kubeconfig의 정적 자격증명(client cert/key 또는 token)만 사용
+- DB `cluster` 테이블의 `oidc_*` 필드는 모두 제거됨
 - `api_server_url`을 내부 IP(`192.168.201.171:6443`)로 변경
 
 ### 5-3. 배포/삭제 흐름 개선
@@ -373,7 +373,5 @@ kubectl exec -n ai-pass3 <pod-name> -- jupyter server list
 ## 8. 향후 개선 사항
 
 1. **DNS 설정**: 내부 DNS에 `*.aipaas -> 192.168.201.171` 와일드카드 레코드 추가하면 짧은 URL 사용 가능
-2. **OIDC 인증 복원**: ClusterEntity에 OIDC 필드 준비됨 (`oidc_issuer_url`, `oidc_client_id` 등). 토큰 자동 갱신 로직 구현 필요
-3. **GPU 노드 확장**: 추가 GPU 노드 연결 시 GPU Operator가 자동으로 Driver/DCGM 설치
-4. **nvidia-smi exporter**: DCGM 대비 더 상세한 메트릭(팬 속도 등)을 원하면 추가 설치 가능
-5. **이벤트 페이지 전체 네임스페이스**: 백엔드 API에 전체 네임스페이스 조회 기능 추가 필요
+2. **GPU 노드 확장**: 추가 GPU 노드 연결 시 GPU Operator가 자동으로 Driver/DCGM 설치
+3. **nvidia-smi exporter**: DCGM 대비 더 상세한 메트릭(팬 속도 등)을 원하면 추가 설치 가능

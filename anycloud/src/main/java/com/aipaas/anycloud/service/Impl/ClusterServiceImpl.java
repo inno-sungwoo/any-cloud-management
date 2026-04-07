@@ -1,11 +1,13 @@
 package com.aipaas.anycloud.service.Impl;
 
+import com.aipaas.anycloud.configuration.bean.KubeconfigProvider;
 import com.aipaas.anycloud.configuration.bean.KubernetesClientConfig;
 import com.aipaas.anycloud.error.enums.ErrorCode;
 import com.aipaas.anycloud.error.exception.ClusterNotFoundException;
 import com.aipaas.anycloud.error.exception.CustomException;
 import com.aipaas.anycloud.error.exception.EntityNotFoundException;
 import com.aipaas.anycloud.model.dto.request.CreateClusterDto;
+import com.aipaas.anycloud.model.dto.response.PageResponseDto;
 import com.aipaas.anycloud.model.dto.request.UpdateClusterDto;
 import com.aipaas.anycloud.model.entity.ClusterEntity;
 import com.aipaas.anycloud.repository.ClusterRepository;
@@ -37,6 +39,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class ClusterServiceImpl implements ClusterService {
 
 	private final ClusterRepository clusterRepository;
+	private final KubeconfigProvider kubeconfigProvider;
 
 	/**
 	 * [ClusterServiceImpl] 쿠버네티스 클러스터 전체 목록 함수
@@ -44,8 +47,9 @@ public class ClusterServiceImpl implements ClusterService {
 	 * @return 전체 쿠버네티스 클러스터 목록을 반환합니다.
 	 */
 	@Transactional(readOnly = true)
-	public List<ClusterEntity> getClusters() {
-		return clusterRepository.findAll();
+	public PageResponseDto<ClusterEntity> getClusters() {
+		List<ClusterEntity> clusters = clusterRepository.findAll();
+		return PageResponseDto.of(clusters, 1, clusters.size());
 	}
 
 	/**
@@ -219,7 +223,7 @@ public class ClusterServiceImpl implements ClusterService {
 			ClusterEntity cluster = clusterRepository.findById(clusterName).orElseThrow(
 					() -> new ClusterNotFoundException(clusterName));
 
-			KubernetesClientConfig manager = new KubernetesClientConfig(cluster);
+			KubernetesClientConfig manager = new KubernetesClientConfig(cluster, kubeconfigProvider.resolvePath());
 			KubernetesClient client = manager.getClient();
 
 			try {
@@ -300,7 +304,7 @@ public class ClusterServiceImpl implements ClusterService {
 	public void updateClusterVersionAndStatus(ClusterEntity clusterEntity) {
 		log.info("Updating version and status for cluster: {}", clusterEntity.getId());
 
-		KubernetesClientConfig manager = new KubernetesClientConfig(clusterEntity);
+		KubernetesClientConfig manager = new KubernetesClientConfig(clusterEntity, kubeconfigProvider.resolvePath());
 		KubernetesClient client = manager.getClient();
 
 		try {
@@ -365,7 +369,7 @@ public class ClusterServiceImpl implements ClusterService {
 	public void updateClusterStatus(ClusterEntity clusterEntity) {
 		log.info("Updating status and version for cluster: {}", clusterEntity.getId());
 
-		KubernetesClientConfig manager = new KubernetesClientConfig(clusterEntity);
+		KubernetesClientConfig manager = new KubernetesClientConfig(clusterEntity, kubeconfigProvider.resolvePath());
 		KubernetesClient client = manager.getClient();
 
 		try {

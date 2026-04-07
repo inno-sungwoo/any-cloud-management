@@ -7,19 +7,19 @@ services:
     environment:
       DATABASE_HOST: anycloud-db
       DATABASE_PORT: 3306
-      DATABASE_NAME: anycloud
+      DATABASE_NAME: aipaas
       DATABASE_USERID: anycloud
       DATABASE_USERPASS: anycloud
-      THANOS_URL: https://localhost:9000
     ports:
       - "8888:8888"
-    #    volumes:
-    #      - ./log:/log/spring
     depends_on:
-      - anycloud-db
+      anycloud-db:
+        condition: service_healthy
+      chartmuseum:
+        condition: service_started
 
   anycloud-db:
-    image: 'linuxserver/mariadb:10.11.3'
+    image: mariadb:10.11
     container_name: anycloud-db
     security_opt:
       - no-new-privileges:true
@@ -27,14 +27,29 @@ services:
       driver: json-file
     environment:
       MYSQL_ROOT_PASSWORD: yourP@ssW0rds
-      MYSQL_DATABASE: anycloud
+      MYSQL_DATABASE: aipaas
       MYSQL_USER: anycloud
       MYSQL_PASSWORD: anycloud
-      PUID: 1001
-      PGID: 1001
       TZ: Asia/Seoul
-    #    ports:
-    #      - "3306:3306"
+    ports:
+      - "13306:3306"
     volumes:
-      - './db_data:/config'
+      - './db_data:/var/lib/mysql'
+      - './docs/infrastructure/db-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro'
       - '/etc/localtime:/etc/localtime:ro'
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chartmuseum:
+    image: ghcr.io/helm/chartmuseum:v0.16.0
+    container_name: chartmuseum
+    ports:
+      - "8880:8080"
+    environment:
+      STORAGE: local
+      STORAGE_LOCAL_ROOTDIR: /charts
+    volumes:
+      - './chartmuseum_data:/charts'

@@ -31,7 +31,7 @@ public class AuditController {
     })
     public ResponseEntity<Object> getEvents(
         @Parameter(description = "클러스터 이름", required = true, example = "openstack")
-        @RequestParam("cluster") String clusterName,
+        @RequestParam("clusterName") String clusterName,
         @Parameter(description = "네임스페이스", required = true, example = "default")
         @RequestParam("namespace") String namespace) {
         log.info("retrieve audit events for cluster: {}, namespace: {}", clusterName, namespace);
