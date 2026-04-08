@@ -331,6 +331,9 @@ CREATE TABLE gpu_reservation (
 
 ### 11-7. 빠른 점검 체크리스트
 
+1. `kubectl config get-contexts -o name` → DB에 등록될 모든 컨텍스트 확인
+2. `./scripts/setup.sh` → DB/ChartMuseum/Prometheus/Ingress/GPU/Frontend/ Backend 설정 기동
+
 다른 환경 진입 후 아래 순서대로 확인하세요.
 
 1. `kubectl config get-contexts -o name` → DB에 등록될 모든 컨텍스트 확인
