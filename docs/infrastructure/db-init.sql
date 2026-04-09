@@ -58,19 +58,6 @@ CREATE TABLE IF NOT EXISTS gpu_reservation (
   UNIQUE KEY uk_release_cluster (release_name, cluster_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 초기 데이터: 클러스터 (플레이스홀더 — setup.sh가 치환)
-INSERT IGNORE INTO cluster (id, description, status, api_server_url, api_server_ip, server_ca, client_ca, client_key, client_token, monit_server_url, cluster_type, cluster_provider)
-VALUES ('innogrid-aikube', 'AI Platform K8s', 'ACTIVE',
-        '@@API_SERVER_URL@@', '@@API_SERVER_IP@@', '', '', '', '',
-        '@@MONIT_SERVER_URL@@', 'k8s', 'on-premise');
-
--- 초기 데이터: Helm 저장소
-INSERT IGNORE INTO helm_repo (id, name, url, insecure_skip_tls_verify) VALUES
-  ('1', 'bitnami', 'https://charts.bitnami.com/bitnami', 0);
-
-INSERT IGNORE INTO helm_repo (id, name, url, insecure_skip_tls_verify) VALUES
-  ('4', 'chart-museum-external', 'http://localhost:8880', 0);
-
 -- anycloud 유저에 aipaas DB 권한 부여 (docker-compose에서 MYSQL_DATABASE=aipaas로 생성 시)
 GRANT ALL PRIVILEGES ON aipaas.* TO 'anycloud'@'%';
 FLUSH PRIVILEGES;

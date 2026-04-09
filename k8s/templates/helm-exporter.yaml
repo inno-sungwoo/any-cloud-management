@@ -1,0 +1,82 @@
+{{- if .Values.helmExporter.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helm-exporter
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: helm-exporter-{{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: helm-exporter-{{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: helm-exporter-{{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: helm-exporter
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: helm-exporter
+  labels:
+    app.kubernetes.io/name: helm-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: helm-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: helm-exporter
+    spec:
+      serviceAccountName: helm-exporter
+      containers:
+        - name: helm-exporter
+          image: {{ .Values.helmExporter.image }}
+          ports:
+            - containerPort: {{ .Values.helmExporter.port }}
+              name: http
+          args: ["-namespaces="]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: helm-exporter
+  labels:
+    app.kubernetes.io/name: helm-exporter
+spec:
+  selector:
+    app.kubernetes.io/name: helm-exporter
+  ports:
+    - port: {{ .Values.helmExporter.port }}
+      targetPort: {{ .Values.helmExporter.port }}
+      name: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: helm-exporter
+  labels:
+    release: {{ .Values.promRelease }}
+spec:
+  endpoints:
+    - interval: 30s
+      port: http
+      honorLabels: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: helm-exporter
+{{- end }}

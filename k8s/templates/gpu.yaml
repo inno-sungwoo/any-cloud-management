@@ -1,0 +1,22 @@
+{{- if .Values.gpu.quota.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: gpu-quota
+spec:
+  hard:
+    requests.nvidia.com/gpu: {{ .Values.gpu.quota.requests | quote }}
+    limits.nvidia.com/gpu: {{ .Values.gpu.quota.limits | quote }}
+{{- end }}
+{{- if .Values.gpu.pricing.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-pricing
+data:
+  A100_KRW_PER_HOUR: {{ .Values.gpu.pricing.a100PerHour | quote }}
+  V100_KRW_PER_HOUR: {{ .Values.gpu.pricing.v100PerHour | quote }}
+  T4_KRW_PER_HOUR: {{ .Values.gpu.pricing.t4PerHour | quote }}
+  DEFAULT_KRW_PER_HOUR: {{ .Values.gpu.pricing.defaultPerHour | quote }}
+{{- end }}
