@@ -5,36 +5,82 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      DATABASE_HOST: anycloud-db
-      DATABASE_PORT: 3306
-      DATABASE_NAME: anycloud
-      DATABASE_USERID: anycloud
-      DATABASE_USERPASS: anycloud
-      THANOS_URL: https://localhost:9000
+      # Spring profile (Dockerfile 의 ENV 와 중복이지만 명시적으로 보이도록 유지)
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-docker}
+      DATABASE_HOST: ${DATABASE_HOST:-anycloud-db}
+      DATABASE_PORT: ${DATABASE_PORT:-3306}
+      DATABASE_NAME: ${DATABASE_NAME:-aipaas}
+      DATABASE_USERID: ${DATABASE_USERID:-anycloud}
+      DATABASE_USERPASS: ${DATABASE_USERPASS:-anycloud}
+      # 새 cluster 행이 INSERT 될 때 monit_server_url 초기값으로 채워짐.
+      # 컨테이너 → 호스트(port-forward 9090).
+      MONIT_DEFAULT_URL: ${MONIT_DEFAULT_URL:-http://host.docker.internal:9090}
     ports:
       - "8888:8888"
-    #    volumes:
-    #      - ./log:/log/spring
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      - anycloud-db
+      anycloud-db:
+        condition: service_healthy
+      chartmuseum:
+        condition: service_started
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
 
   anycloud-db:
-    image: 'linuxserver/mariadb:10.11.3'
+    image: mariadb:10.11
     container_name: anycloud-db
     security_opt:
       - no-new-privileges:true
     logging:
       driver: json-file
     environment:
-      MYSQL_ROOT_PASSWORD: yourP@ssW0rds
-      MYSQL_DATABASE: anycloud
-      MYSQL_USER: anycloud
-      MYSQL_PASSWORD: anycloud
-      PUID: 1001
-      PGID: 1001
-      TZ: Asia/Seoul
-    #    ports:
-    #      - "3306:3306"
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-yourP@ssW0rds}
+      MYSQL_DATABASE: ${DATABASE_NAME:-aipaas}
+      MYSQL_USER: ${DATABASE_USERID:-anycloud}
+      MYSQL_PASSWORD: ${DATABASE_USERPASS:-anycloud}
+      TZ: ${TZ:-Asia/Seoul}
+    ports:
+      - "13306:3306"
     volumes:
-      - './db_data:/config'
+      - './db_data:/var/lib/mysql'
+      - './docs/infrastructure/db-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro'
       - '/etc/localtime:/etc/localtime:ro'
+    healthcheck:
+      test: [ "CMD", "healthcheck.sh", "--connect", "--innodb_initialized" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chartmuseum:
+    image: ghcr.io/helm/chartmuseum:v0.16.0
+    container_name: chartmuseum
+    ports:
+      - "8880:8080"
+    environment:
+      STORAGE: local
+      STORAGE_LOCAL_ROOTDIR: /charts
+      DISABLE_API: "false"
+      ALLOW_OVERWRITE: "true"
+    volumes:
+      - './chartmuseum_data:/charts'
+
+  # ─────────────────────────────────────────────────────────────
+  # 프론트엔드 (ai-paas-web)
+  # 사전 준비: ../ai-paas-web 경로에 프론트엔드 저장소 클론
+  # ─────────────────────────────────────────────────────────────
+  anycloud-frontend:
+    container_name: anycloud-frontend
+    image: node:20-alpine
+    working_dir: /app
+    environment:
+      VITE_API_BASE_URL: http://anycloud-backend:8888/api/v1
+    ports:
+      - "5173:5173"
+    volumes:
+      - '../ai-paas-web:/app'
+    command: [ "sh", "-c", "corepack enable && rm -rf node_modules && pnpm install && pnpm dev --host 0.0.0.0" ]
+    depends_on:
+      - anycloud-backend
+    restart: unless-stopped

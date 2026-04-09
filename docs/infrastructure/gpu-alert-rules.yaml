@@ -1,0 +1,19 @@
+# GPU 유휴 경고 AlertRule
+# 활용률 20% 미만이 2시간 이상 지속되면 GPUIdleWarning 알림 발생
+# 주제2(비용 최적화)의 /api/cost/idle-warnings API에서 이 알림을 조회함
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gpu-alert-rules
+  namespace: monitoring
+spec:
+  groups:
+  - name: gpu.rules
+    rules:
+    - alert: GPUIdleWarning
+      expr: DCGM_FI_DEV_GPU_UTIL < 20
+      for: 2h
+      labels:
+        severity: warning
+      annotations:
+        summary: "GPU 활용률 2시간 이상 20% 미만"

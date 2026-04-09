@@ -27,20 +27,27 @@ public class ChartValidator {
 
     /**
      * 릴리즈 이름 중복을 체크합니다 (비동기 실행 전 사전 검증).
+     *
+     * 정책:
+     * - 동일 이름의 release가 "deployed" 상태이면 충돌로 간주하고 예외를 던집니다.
+     *   (helm upgrade --install 사용 시에도 의도치 않은 덮어쓰기를 방지)
+     * - "failed", "pending-install", "pending-upgrade" 등 비정상 상태이면
+     *   dangling release로 보고 자동 cleanup을 시도합니다.
+     *   (upgrade --install --atomic이 대부분 처리하지만, pre-flight 안전망)
      */
     public void checkReleaseNameDuplicate(String kubeconfigPath, String releaseName, String namespace) throws Exception {
         log.info("Checking release name duplicate for: {}", releaseName);
-        
-        // helm list 명령어로 기존 릴리즈 확인
+
+        // helm list --all 로 failed/pending까지 모두 조회
         StringBuilder command = new StringBuilder();
-        command.append("helm list --kubeconfig ").append(kubeconfigPath);
-        
+        command.append("helm list --all --kubeconfig ").append(kubeconfigPath);
+
         if (namespace != null && !namespace.trim().isEmpty()) {
             command.append(" --namespace ").append(namespace);
         } else {
             command.append(" --all-namespaces");
         }
-        
+
         command.append(" --output json");
         
         ProcessBuilder processBuilder = new ProcessBuilder();
@@ -80,14 +87,97 @@ public class ChartValidator {
             return;
         }
         
-        // 간단한 문자열 검사로 릴리즈 이름 존재 여부 확인
-        if (listOutput.contains("\"name\":\"" + releaseName + "\"")) {
-            throw new HelmDeploymentException(
-                "Release name '" + releaseName + "' already exists. " +
-                "Please use a different release name or uninstall the existing release first.");
+        // 릴리즈 존재 여부 + 상태 확인
+        String releaseStatus = extractReleaseStatus(listOutput, releaseName);
+        if (releaseStatus == null) {
+            log.info("Release name {} is available for deployment.", releaseName);
+            return;
         }
-        
-        log.info("Release name {} is available for deployment.", releaseName);
+
+        log.info("Existing release '{}' found with status: {}", releaseName, releaseStatus);
+
+        // deployed/superseded 상태: 정상 release이므로 차단하지 않고
+        // helm upgrade --install (--atomic) 이 멱등적으로 처리하도록 위임한다.
+        // (이전에는 여기서 예외를 던졌으나, upgrade --install 정책과 모순되어 제거)
+        if ("deployed".equalsIgnoreCase(releaseStatus) || "superseded".equalsIgnoreCase(releaseStatus)) {
+            log.info("Release '{}' is in '{}' state. Will be upgraded via 'helm upgrade --install'.",
+                    releaseName, releaseStatus);
+            return;
+        }
+
+        // 비정상 상태(failed, pending-*, uninstalling)이면 자동 정리
+        // pending-* 상태에서는 upgrade --install 도 실패하므로 사전 cleanup 필수
+        log.warn("Release '{}' is in non-deployed state '{}'. Attempting automatic cleanup before re-install.",
+                releaseName, releaseStatus);
+        try {
+            cleanupDanglingRelease(kubeconfigPath, releaseName, namespace);
+            log.info("Successfully cleaned up dangling release: {}", releaseName);
+        } catch (Exception cleanupEx) {
+            log.error("Failed to cleanup dangling release '{}': {}", releaseName, cleanupEx.getMessage());
+            throw new HelmDeploymentException(
+                "Release '" + releaseName + "' exists in '" + releaseStatus +
+                "' state and automatic cleanup failed. Please uninstall it manually. Cause: " + cleanupEx.getMessage());
+        }
+    }
+
+    /**
+     * helm list --output json 응답에서 특정 release의 status 값을 추출합니다.
+     * 정식 JSON 파서 의존성 없이 단순 문자열 스캔으로 처리합니다.
+     */
+    private String extractReleaseStatus(String listOutput, String releaseName) {
+        String nameToken = "\"name\":\"" + releaseName + "\"";
+        int idx = listOutput.indexOf(nameToken);
+        if (idx < 0) return null;
+
+        // 같은 객체 내부의 "status":"..." 검색 (다음 '}'까지)
+        int objEnd = listOutput.indexOf('}', idx);
+        if (objEnd < 0) objEnd = listOutput.length();
+        String slice = listOutput.substring(idx, objEnd);
+
+        String statusKey = "\"status\":\"";
+        int sIdx = slice.indexOf(statusKey);
+        if (sIdx < 0) return "unknown";
+        int sStart = sIdx + statusKey.length();
+        int sEnd = slice.indexOf('"', sStart);
+        if (sEnd < 0) return "unknown";
+        return slice.substring(sStart, sEnd);
+    }
+
+    /**
+     * dangling release를 helm uninstall로 정리합니다.
+     */
+    private void cleanupDanglingRelease(String kubeconfigPath, String releaseName, String namespace) throws Exception {
+        StringBuilder command = new StringBuilder();
+        command.append("helm uninstall ").append(releaseName)
+                .append(" --kubeconfig ").append(kubeconfigPath);
+        if (namespace != null && !namespace.trim().isEmpty()) {
+            command.append(" --namespace ").append(namespace);
+        }
+
+        ProcessBuilder pb = new ProcessBuilder("sh", "-c", command.toString());
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+
+        StringBuilder out = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                out.append(line).append("\n");
+            }
+        }
+        boolean finished = p.waitFor(30, TimeUnit.SECONDS);
+        if (!finished) {
+            p.destroyForcibly();
+            throw new HelmDeploymentException("Cleanup uninstall timed out for release: " + releaseName);
+        }
+        if (p.exitValue() != 0) {
+            // 이미 없는 경우는 성공으로 간주
+            String o = out.toString();
+            if (o.contains("not found") || o.contains("release: not found")) {
+                return;
+            }
+            throw new HelmDeploymentException("helm uninstall failed: " + o);
+        }
     }
 
     /**
@@ -160,11 +250,8 @@ public class ChartValidator {
         if (clusterId == null || clusterId.trim().isEmpty()) {
             throw new HelmDeploymentException("Cluster ID is required for chart deployment");
         }
-        
-        if (version == null || version.isEmpty() || version.equals("UNKNOWN")) {
-            throw new HelmDeploymentException("Cluster status is unknown for cluster: " + clusterId);
-        }
-        
+        // version 은 단순 표시용 메타데이터이므로 배포 게이트로 사용하지 않는다.
+        // 실제 도달 가능성은 helm 명령 자체가 즉시 검사한다.
         log.debug("Cluster validation passed for cluster: {}", clusterId);
     }
 

@@ -2,7 +2,10 @@ package com.aipaas.anycloud.controller;
 
 import com.aipaas.anycloud.model.dto.request.CreateClusterDto;
 import com.aipaas.anycloud.model.dto.request.UpdateClusterDto;
+import com.aipaas.anycloud.model.dto.response.PageResponseDto;
 import com.aipaas.anycloud.model.entity.ClusterEntity;
+import com.aipaas.anycloud.service.ClusterDiagnoseService;
+import com.aipaas.anycloud.service.ClusterMonitHealthChecker;
 import com.aipaas.anycloud.service.ClusterService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -33,6 +36,8 @@ import org.springframework.web.bind.annotation.RestController;
 public class ClusterController {
 
 	private final ClusterService clusterService;
+	private final ClusterDiagnoseService clusterDiagnoseService;
+	private final ClusterMonitHealthChecker clusterMonitHealthChecker;
 
 	/**
 	 * [ClusterController] 클러스터 목록 조회 함수
@@ -42,10 +47,28 @@ public class ClusterController {
 	 */
 	@GetMapping("/clusters")
 	@Operation(summary = "클러스터 목록 조회", description = "클러스터 전체 목록을 조회합니다.")
-	public ResponseEntity<List<ClusterEntity>> getClusters() {
+	public ResponseEntity<PageResponseDto<ClusterEntity>> getClusters() {
 		return new ResponseEntity<>(clusterService.getClusters(),
 				new HttpHeaders(),
 				HttpStatus.OK);
+	}
+
+	@GetMapping("/cluster/{cluster_name}/diagnose")
+	@Operation(summary = "클러스터 모니터링 진단",
+			description = "Prometheus 도달성 + exporter 설치 여부 + 샘플 메트릭 값 반환")
+	public ResponseEntity<java.util.Map<String, Object>> diagnoseCluster(
+			@PathVariable("cluster_name") String clusterName) {
+		return ResponseEntity.ok(clusterDiagnoseService.diagnose(clusterName));
+	}
+
+	@PostMapping("/cluster/{cluster_name}/monit-health-check")
+	@Operation(summary = "클러스터 모니터링 헬스 즉시 점검",
+			description = "스케줄 외 즉시 헬스체크를 트리거하고 갱신된 클러스터 정보를 반환")
+	public ResponseEntity<ClusterEntity> triggerHealthCheck(
+			@PathVariable("cluster_name") String clusterName) {
+		ClusterEntity c = clusterService.getCluster(clusterName);
+		clusterMonitHealthChecker.check(c);
+		return ResponseEntity.ok(clusterService.getCluster(clusterName));
 	}
 
 	/**

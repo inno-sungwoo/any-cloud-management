@@ -20,9 +20,6 @@ RUN chmod +x ./gradlew
 # Copy source code
 COPY anycloud/ anycloud/
 
-# Copy application properties
-COPY application.properties_docker anycloud/src/main/resources/application.properties
-
 # Build the application
 RUN ./gradlew bootJar --no-daemon --info
 
@@ -52,6 +49,9 @@ RUN chown -R anycloud:anycloud /app
 ENV XDG_CACHE_HOME=/app/.cache \
     XDG_CONFIG_HOME=/app/.config \
     XDG_DATA_HOME=/app/.local/share
+
+# Spring profile — application-docker.properties 활성화
+ENV SPRING_PROFILES_ACTIVE=docker
 
 # Switch to non-root user
 USER anycloud

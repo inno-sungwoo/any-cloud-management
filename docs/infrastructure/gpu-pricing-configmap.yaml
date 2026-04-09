@@ -1,0 +1,14 @@
+# GPU 모델별 시간당 비용 단가 (KRW)
+# CostController에서 KubernetesClient로 이 ConfigMap을 읽어 비용 계산에 사용
+# 클라우드 비교 단가 기준 참고값 (공식 과금 아님)
+# DCGM에 modelName 레이블이 없으면 DEFAULT_KRW_PER_HOUR 사용
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-pricing
+  namespace: monitoring
+data:
+  A100_KRW_PER_HOUR: "1200"
+  V100_KRW_PER_HOUR: "800"
+  T4_KRW_PER_HOUR: "400"
+  DEFAULT_KRW_PER_HOUR: "600"

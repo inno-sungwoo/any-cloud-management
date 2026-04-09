@@ -1,6 +1,12 @@
 package com.aipaas.anycloud.service.Impl;
 
+import com.aipaas.anycloud.configuration.bean.KubeconfigProvider;
+import com.aipaas.anycloud.configuration.bean.KubernetesClientConfig;
 import com.aipaas.anycloud.error.exception.EntityNotFoundException;
+import io.fabric8.kubernetes.client.KubernetesClient;
+import com.aipaas.anycloud.model.dto.response.AlertDto;
+import com.aipaas.anycloud.model.dto.response.MonitoringSummaryDto;
+import com.aipaas.anycloud.model.dto.response.ReleaseStatusDto;
 import com.aipaas.anycloud.model.entity.ClusterEntity;
 import com.aipaas.anycloud.model.entity.MonitEntity;
 import com.aipaas.anycloud.repository.ClusterRepository;
@@ -31,6 +37,7 @@ public class MonitServiceImpl implements MonitService {
 
 	private final ObjectMapper objectMapper;
 	private final ClusterRepository clusterRepository;
+	private final KubeconfigProvider kubeconfigProvider;
 	private final WebClient webClient;
 	private final PrometheusQueryService prometheusQueryService;
 
@@ -38,10 +45,23 @@ public class MonitServiceImpl implements MonitService {
 		ClusterEntity cluster = clusterRepository.findById(clusterName).orElseThrow(
 				() -> new EntityNotFoundException("Cluster with Name " + clusterName + " Not Found."));
 		String monitUrl = cluster.getMonitServerUrl();
-		if (monitUrl == null || monitUrl.isEmpty()) {
-			throw new EntityNotFoundException("Monitoring Url Not Found for cluster: " + clusterName);
+		// 1. URL이 비어있거나 placeholder인 경우 → 503
+		if (monitUrl == null || monitUrl.isBlank() || monitUrl.contains("@@")
+				|| !(monitUrl.startsWith("http://") || monitUrl.startsWith("https://"))) {
+			throw new org.springframework.web.server.ResponseStatusException(
+					org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+					"Cluster '" + clusterName + "' has no valid monitoring endpoint configured");
 		}
-		log.info("Using monitUrl: {} for cluster: {}", monitUrl, clusterName);
+		// 2. 헬스체커가 UNREACHABLE로 마킹한 경우 → 503 (백엔드가 hang하지 않도록 즉시 차단)
+		String status = cluster.getMonitStatus();
+		if (status != null && !"ACTIVE".equals(status)) {
+			throw new org.springframework.web.server.ResponseStatusException(
+					org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+					"Cluster '" + clusterName + "' monitoring is " + status
+							+ (cluster.getMonitLastError() != null
+									? ": " + cluster.getMonitLastError() : ""));
+		}
+		log.debug("Using monitUrl: {} for cluster: {}", monitUrl, clusterName);
 		return monitUrl;
 	}
 
@@ -158,13 +178,351 @@ public class MonitServiceImpl implements MonitService {
 		}
 	}
 
+	@Override
+	public Object monitoringSummary(String clusterName) {
+		String monitUrl = getMonitUrl(clusterName);
+
+		String helmReleasesQuery = prometheusQueryService.resolve("monitoring", "helm_releases", null);
+		String gpuCountQuery = prometheusQueryService.resolve("monitoring", "gpu_count", null);
+		String gpuAvgUtilQuery = prometheusQueryService.resolve("monitoring", "gpu_avg_util", null);
+		String activeAlertsQuery = prometheusQueryService.resolve("monitoring", "active_alerts", null);
+
+		int helmReleaseCount = extractScalarInt(executeQueryRaw(monitUrl, "query", helmReleasesQuery, null));
+		int gpuCount = extractScalarInt(executeQueryRaw(monitUrl, "query", gpuCountQuery, null));
+		double avgGpuUtil = extractScalarDouble(executeQueryRaw(monitUrl, "query", gpuAvgUtilQuery, null));
+		int activeAlertCount = extractScalarInt(executeQueryRaw(monitUrl, "query", activeAlertsQuery, null));
+
+		return MonitoringSummaryDto.builder()
+				.helmReleaseCount(helmReleaseCount)
+				.gpuCount(gpuCount)
+				.avgGpuUtil(avgGpuUtil)
+				.activeAlertCount(activeAlertCount)
+				.build();
+	}
+
+	@Override
+	public Object monitoringReleases(String clusterName) {
+		String monitUrl = getMonitUrl(clusterName);
+
+		// 1. Helm 릴리즈 목록 조회
+		String releaseQuery = prometheusQueryService.resolve("monitoring", "release_status", null);
+		JsonNode releaseResult = executeQueryRaw(monitUrl, "query", releaseQuery, null);
+
+		// 2. GPU 요청 Pod 조회 (어떤 릴리즈가 GPU를 쓰는지)
+		// kube_pod_container_resource_requests{resource="nvidia_com_gpu"} → namespace, pod 라벨
+		JsonNode gpuPodResult = executeQueryRaw(monitUrl, "query",
+				"kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"}", null);
+		Set<String> gpuNamespaces = new HashSet<>();
+		if (gpuPodResult.isArray()) {
+			for (JsonNode node : gpuPodResult) {
+				String ns = node.path("metric").path("namespace").asText("");
+				if (!ns.isEmpty()) gpuNamespaces.add(ns);
+			}
+		}
+
+		// 3. GPU 메트릭 조회 (UUID별 — 멀티 GPU 대응)
+		// nvidia_smi_* 메트릭은 uuid 라벨로 GPU별 구분
+		Map<String, Map<String, Object>> gpuDataByUuid = new HashMap<>();
+		JsonNode gpuInfoResult = executeQueryRaw(monitUrl, "query", "nvidia_smi_gpu_info", null);
+		if (gpuInfoResult.isArray()) {
+			for (JsonNode node : gpuInfoResult) {
+				JsonNode m = node.get("metric");
+				String uuid = m.path("uuid").asText("");
+				if (!uuid.isEmpty()) {
+					Map<String, Object> data = new HashMap<>();
+					data.put("name", m.path("name").asText(""));
+					gpuDataByUuid.put(uuid, data);
+				}
+			}
+		}
+		// 각 GPU UUID별 메트릭 수집
+		for (String metricQuery : new String[]{
+				"nvidia_smi_utilization_gpu_ratio * 100",
+				"nvidia_smi_temperature_gpu",
+				"nvidia_smi_power_draw_watts",
+				"nvidia_smi_memory_used_bytes / 1048576",
+				"nvidia_smi_memory_total_bytes / 1048576"}) {
+			JsonNode metricResult = executeQueryRaw(monitUrl, "query", metricQuery, null);
+			if (metricResult.isArray()) {
+				for (JsonNode node : metricResult) {
+					String uuid = node.path("metric").path("uuid").asText("");
+					double value = node.path("value").get(1).asDouble(0.0);
+					Map<String, Object> data = gpuDataByUuid.computeIfAbsent(uuid, k -> new HashMap<>());
+					if (metricQuery.contains("utilization_gpu")) data.put("util", value);
+					else if (metricQuery.contains("temperature")) data.put("temp", value);
+					else if (metricQuery.contains("power_draw")) data.put("power", value);
+					else if (metricQuery.contains("memory_used")) data.put("vramUsed", value);
+					else if (metricQuery.contains("memory_total")) data.put("vramTotal", value);
+				}
+			}
+		}
+
+		// 4. 릴리즈 목록 파싱
+		List<ReleaseStatusDto> releases = new ArrayList<>();
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+				.withZone(ZoneId.of("Asia/Seoul"));
+
+		if (releaseResult.isArray()) {
+			for (JsonNode node : releaseResult) {
+				JsonNode metric = node.get("metric");
+				String releaseName = metric.has("release") ? metric.get("release").asText() :
+						(metric.has("name") ? metric.get("name").asText() : "");
+				// helm-exporter의 namespace는 exporter pod 네임스페이스(monitoring)이므로
+			// 실제 릴리즈 네임스페이스인 exported_namespace를 우선 사용
+			String namespace = metric.has("exported_namespace") ? metric.get("exported_namespace").asText() :
+					(metric.has("namespace") ? metric.get("namespace").asText() : "");
+				String description = metric.has("description") ? metric.get("description").asText() : "";
+				String status = description.contains("complete") ? "deployed" :
+								description.contains("failed") ? "failed" : description;
+
+				// updated 타임스탬프 변환
+				String updatedRaw = metric.has("updated") ? metric.get("updated").asText() : "";
+				String updatedFormatted = updatedRaw;
+				try {
+					long ts = Long.parseLong(updatedRaw);
+					if (ts > 1000000000000L) ts = ts / 1000;
+					updatedFormatted = formatter.format(Instant.ofEpochSecond(ts));
+				} catch (NumberFormatException ignored) {}
+
+				// GPU 데이터: 해당 릴리즈의 namespace가 GPU를 사용하는 경우만 표시
+				ReleaseStatusDto.ReleaseStatusDtoBuilder builder = ReleaseStatusDto.builder()
+						.name(releaseName)
+						.namespace(namespace)
+						.status(status)
+						.chart(metric.has("chart") ? metric.get("chart").asText() : "")
+						.chartVersion(metric.has("version") ? metric.get("version").asText() : "")
+						.updated(updatedFormatted);
+
+				if (gpuNamespaces.contains(namespace) && !gpuDataByUuid.isEmpty()) {
+					// 이 릴리즈가 GPU를 사용하는 namespace에 있으면 GPU 데이터 표시
+					Map<String, Object> gpu = gpuDataByUuid.values().iterator().next();
+					builder.gpuUtil((Double) gpu.getOrDefault("util", null))
+							.gpuName((String) gpu.getOrDefault("name", null))
+							.gpuTemp((Double) gpu.getOrDefault("temp", null))
+							.gpuPowerWatt((Double) gpu.getOrDefault("power", null))
+							.vramUsedMb((Double) gpu.getOrDefault("vramUsed", null))
+							.vramTotalMb((Double) gpu.getOrDefault("vramTotal", null));
+				}
+				// GPU를 사용하지 않는 릴리즈는 null (프론트에서 "-" 표시)
+
+				releases.add(builder.build());
+			}
+		}
+		return releases;
+	}
+
+	@Override
+	public Object monitoringAlerts(String clusterName) {
+		String monitUrl = getMonitUrl(clusterName);
+		try {
+			URI alertUri = UriComponentsBuilder.fromHttpUrl(monitUrl)
+					.replacePath("/api/v2/alerts")
+					.queryParam("active", "true")
+					.build()
+					.toUri();
+
+			String responseBody = webClient.get()
+					.uri(alertUri)
+					.retrieve()
+					.bodyToMono(String.class)
+					.block();
+
+			JsonNode alertsArray = objectMapper.readTree(responseBody);
+			List<AlertDto> alerts = new ArrayList<>();
+
+			if (alertsArray.isArray()) {
+				for (JsonNode alertNode : alertsArray) {
+					JsonNode labels = alertNode.path("labels");
+					JsonNode annotations = alertNode.path("annotations");
+					JsonNode status = alertNode.path("status");
+
+					alerts.add(AlertDto.builder()
+							.alertName(labels.path("alertname").asText(""))
+							.severity(labels.path("severity").asText(""))
+							.namespace(labels.path("namespace").asText(""))
+							.message(annotations.path("description").asText(
+									annotations.path("message").asText("")))
+							.startsAt(alertNode.path("startsAt").asText(""))
+							.status(status.path("state").asText(
+									alertNode.path("state").asText("")))
+							.build());
+				}
+			}
+			return alerts;
+		} catch (Exception e) {
+			log.error("Failed to fetch alerts from AlertManager: {}", e.getMessage(), e);
+			return new ArrayList<AlertDto>();
+		}
+	}
+
+	@Override
+	public Object monitoringGpuStatus(String clusterName) {
+		String monitUrl = getMonitUrl(clusterName);
+
+		// GPU 카드별 정보 수집 — DCGM Exporter의 DCGM_FI_DEV_GPU_UTIL을 기준으로 UUID 목록 확보
+		List<Map<String, Object>> gpuList = new ArrayList<>();
+		JsonNode gpuInfoResult = executeQueryRaw(monitUrl, "query", "DCGM_FI_DEV_GPU_UTIL", null);
+		if (gpuInfoResult.isArray()) {
+			for (JsonNode node : gpuInfoResult) {
+				JsonNode m = node.get("metric");
+				String uuid = m.path("UUID").asText("");
+				Map<String, Object> gpu = new LinkedHashMap<>();
+				gpu.put("uuid", uuid);
+				gpu.put("name", m.path("modelName").asText(""));
+				gpu.put("driverVersion", m.path("DCGM_FI_DRIVER_VERSION").asText(""));
+				gpuList.add(gpu);
+			}
+		}
+
+		// 각 GPU UUID별 실시간 메트릭 수집 (DCGM 메트릭)
+		Map<String, String> metricQueries = new LinkedHashMap<>();
+		metricQueries.put("utilization", "DCGM_FI_DEV_GPU_UTIL");
+		metricQueries.put("memoryUtilization", "DCGM_FI_DEV_MEM_COPY_UTIL");
+		metricQueries.put("temperature", "DCGM_FI_DEV_GPU_TEMP");
+		metricQueries.put("powerDraw", "DCGM_FI_DEV_POWER_USAGE");
+		metricQueries.put("vramUsedMb", "DCGM_FI_DEV_FB_USED");
+		metricQueries.put("vramTotalMb", "(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE)");
+		metricQueries.put("fanSpeed", "DCGM_FI_DEV_FAN_SPEED");
+
+		Map<String, Map<String, Double>> metricsByUuid = new HashMap<>();
+		for (Map.Entry<String, String> entry : metricQueries.entrySet()) {
+			JsonNode metricResult = executeQueryRaw(monitUrl, "query", entry.getValue(), null);
+			if (metricResult.isArray()) {
+				for (JsonNode node : metricResult) {
+					String uuid = node.path("metric").path("UUID").asText("");
+					double value = node.path("value").get(1).asDouble(0.0);
+					metricsByUuid.computeIfAbsent(uuid, k -> new HashMap<>())
+							.put(entry.getKey(), value);
+				}
+			}
+		}
+
+		// GPU 정보 + 메트릭 합침
+		for (Map<String, Object> gpu : gpuList) {
+			String uuid = (String) gpu.get("uuid");
+			Map<String, Double> metrics = metricsByUuid.getOrDefault(uuid, new HashMap<>());
+			gpu.put("utilization", metrics.getOrDefault("utilization", 0.0));
+			gpu.put("memoryUtilization", metrics.getOrDefault("memoryUtilization", 0.0));
+			gpu.put("temperature", metrics.getOrDefault("temperature", 0.0));
+			gpu.put("powerDraw", metrics.getOrDefault("powerDraw", 0.0));
+			gpu.put("vramUsedMb", metrics.getOrDefault("vramUsedMb", 0.0));
+			gpu.put("vramTotalMb", metrics.getOrDefault("vramTotalMb", 0.0));
+			gpu.put("fanSpeed", metrics.getOrDefault("fanSpeed", 0.0));
+		}
+
+		// nvidia_smi exporter가 없는 경우 kube GPU 리소스 요청 정보로 fallback
+		if (gpuList.isEmpty()) {
+			log.info("No nvidia_smi metrics found, falling back to kube GPU resource requests");
+			JsonNode gpuRequestResult = executeQueryRaw(monitUrl, "query",
+					"kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"}", null);
+			// 여러 kube-state-metrics 인스턴스가 동일 pod를 노출할 수 있으므로 namespace+pod 기준 dedupe
+			Map<String, Map<String, Object>> dedup = new LinkedHashMap<>();
+			if (gpuRequestResult.isArray()) {
+				for (JsonNode node : gpuRequestResult) {
+					JsonNode m = node.get("metric");
+					String ns = m.path("namespace").asText("");
+					String pod = m.path("pod").asText("");
+					String nodeName = m.path("node").asText("");
+					double gpuCount = node.path("value").get(1).asDouble(0.0);
+					String key = ns + "/" + pod;
+					Map<String, Object> gpu = dedup.get(key);
+					if (gpu == null) {
+						gpu = new LinkedHashMap<>();
+						gpu.put("uuid", "gpu-alloc-" + dedup.size());
+						gpu.put("name", "GPU (할당 정보)");
+						gpu.put("driverVersion", "-");
+						gpu.put("utilization", 0.0);
+						gpu.put("memoryUtilization", 0.0);
+						gpu.put("temperature", 0.0);
+						gpu.put("powerDraw", 0.0);
+						gpu.put("vramUsedMb", 0.0);
+						gpu.put("vramTotalMb", 0.0);
+						gpu.put("fanSpeed", 0.0);
+						gpu.put("allocatedGpu", gpuCount);
+						gpu.put("namespace", ns);
+						gpu.put("pod", pod);
+						gpu.put("node", nodeName);
+						dedup.put(key, gpu);
+					} else if (!nodeName.isEmpty() && ((String) gpu.get("node")).isEmpty()) {
+						gpu.put("node", nodeName);
+					}
+				}
+			}
+			// fabric8 client로 모든 GPU pod의 node/상태(phase) 정보를 보강
+			// Prometheus TSDB에는 삭제된 pod의 stale 메트릭이 남아있을 수 있으므로,
+			// 클러스터에 실제로 존재하지 않는 pod는 결과에서 제외한다.
+			if (!dedup.isEmpty()) {
+				KubernetesClientConfig mgr = null;
+				try {
+					mgr = new KubernetesClientConfig(
+							clusterRepository.findById(clusterName).orElseThrow(),
+							kubeconfigProvider.resolvePath());
+					KubernetesClient k8s = mgr.getClient();
+					Iterator<Map.Entry<String, Map<String, Object>>> it = dedup.entrySet().iterator();
+					while (it.hasNext()) {
+						Map<String, Object> gpu = it.next().getValue();
+						try {
+							var podObj = k8s.pods()
+									.inNamespace((String) gpu.get("namespace"))
+									.withName((String) gpu.get("pod"))
+									.get();
+							if (podObj == null) {
+								// stale 메트릭 — 실제 pod 없음
+								it.remove();
+								continue;
+							}
+							if (podObj.getSpec() != null && podObj.getSpec().getNodeName() != null) {
+								gpu.put("node", podObj.getSpec().getNodeName());
+							}
+							if (podObj.getStatus() != null && podObj.getStatus().getPhase() != null) {
+								gpu.put("phase", podObj.getStatus().getPhase());
+							}
+						} catch (Exception e) {
+							log.debug("Failed to fetch pod info for {}/{}: {}",
+									gpu.get("namespace"), gpu.get("pod"), e.getMessage());
+						}
+					}
+				} catch (Exception e) {
+					log.warn("Failed to enrich GPU pod info via Kubernetes API: {}", e.getMessage());
+				} finally {
+					if (mgr != null) mgr.closeClient();
+				}
+			}
+			gpuList.addAll(dedup.values());
+		}
+
+		return gpuList;
+	}
+
+	private int extractScalarInt(JsonNode result) {
+		try {
+			if (result.isArray() && result.size() > 0) {
+				return (int) result.get(0).get("value").get(1).asDouble(0);
+			}
+		} catch (Exception e) {
+			log.warn("Failed to extract scalar int from result: {}", e.getMessage());
+		}
+		return 0;
+	}
+
+	private double extractScalarDouble(JsonNode result) {
+		try {
+			if (result.isArray() && result.size() > 0) {
+				return result.get(0).get("value").get(1).asDouble(0.0);
+			}
+		} catch (Exception e) {
+			log.warn("Failed to extract scalar double from result: {}", e.getMessage());
+		}
+		return 0.0;
+	}
+
 	private JsonNode executeQueryRaw(String monitUrl, String metricType, String query,
 			Map<String, Long> timeQueryParams) {
 		try {
 			String encodedQuery = UriUtils.encode(query, StandardCharsets.UTF_8);
 
-			log.error("query : {} ", query);
-			log.error("encodedQuery : {} ", encodedQuery);
+			log.debug("query : {} ", query);
+			log.debug("encodedQuery : {} ", encodedQuery);
 			UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(monitUrl)
 					.path("/api/v1/" + metricType)
 					.queryParam("query", encodedQuery);
@@ -186,22 +544,19 @@ public class MonitServiceImpl implements MonitService {
 					.uri(uri)
 					.retrieve()
 					.bodyToMono(String.class)
+					.timeout(java.time.Duration.ofSeconds(5))
+					.retry(1)
 					.block();
 
 			JsonNode rootNode = objectMapper.readTree(responseBody);
-			log.error("responseBody : {} ", responseBody);
-			JsonNode resultArray = rootNode.path("data").path("result");
-
-			// if (resultArray.isArray() && resultArray.size() > 0) {
-			// 	return resultArray;
-			// }
-
-			return resultArray;
-			// throw new IllegalStateException("No valid data in Prometheus response");
+			log.debug("responseBody : {} ", responseBody);
+			return rootNode.path("data").path("result");
 
 		} catch (Exception e) {
-			log.error("Failed to execute Prometheus query: {}", e.getMessage(), e);
-			throw new RuntimeException("Prometheus query failed", e);
+			log.warn("Prometheus query failed (returning empty result): {} - {}",
+					query, e.getMessage());
+			// 부분 실패 허용: 전체 응답이 깨지지 않도록 빈 배열 반환
+			return objectMapper.createArrayNode();
 		}
 	}
 

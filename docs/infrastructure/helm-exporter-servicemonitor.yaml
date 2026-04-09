@@ -1,0 +1,18 @@
+# helm-exporter ServiceMonitor (honorLabels 포함)
+# helm-exporter 차트의 serviceMonitor가 honorLabels를 지원하지 않으므로 수동 적용
+# 적용: kubectl apply -f helm-exporter-servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: helm-exporter
+  namespace: monitoring
+  labels:
+    release: ai-pass3-prom
+spec:
+  endpoints:
+  - interval: 30s
+    port: http
+    honorLabels: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: helm-exporter

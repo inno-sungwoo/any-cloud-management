@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ai-pass-resources
+description: AI-PaaS 부가 K8s 리소스 (Ingress, ServiceMonitor, GPU Quota, helm-exporter)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

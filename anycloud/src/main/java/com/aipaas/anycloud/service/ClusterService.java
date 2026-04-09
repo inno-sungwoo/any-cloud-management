@@ -2,6 +2,7 @@ package com.aipaas.anycloud.service;
 
 import com.aipaas.anycloud.model.dto.request.CreateClusterDto;
 import com.aipaas.anycloud.model.dto.request.UpdateClusterDto;
+import com.aipaas.anycloud.model.dto.response.PageResponseDto;
 import com.aipaas.anycloud.model.entity.ClusterEntity;
 import java.util.List;
 import org.springframework.http.HttpStatus;
@@ -18,7 +19,7 @@ import org.springframework.stereotype.Component;
 @Component
 public interface ClusterService {
 
-	List<ClusterEntity> getClusters();
+	PageResponseDto<ClusterEntity> getClusters();
 
 	ClusterEntity getCluster(String clusterName);
 

@@ -1,0 +1,12 @@
+# DCGM Exporter - GPU 메트릭 수집
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: ai-pass3-prom
+  namespace: ai-pass3
+
+tolerations:
+  - operator: Exists
+
+nodeSelector:
+  nvidia.com/gpu.present: "true"

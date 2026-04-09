@@ -1,0 +1,89 @@
+# ai-pass 네임스페이스 전용 Prometheus Stack
+# ai-platform-k8s 클러스터용
+
+grafana:
+  enabled: false
+
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+prometheus:
+  prometheusSpec:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+    retention: 14d
+    storageSpec: {}
+    # 모든 ServiceMonitor/PodMonitor를 수집 (네임스페이스 제한 없음)
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    podMonitorNamespaceSelector: {}
+    ruleSelectorNilUsesHelmValues: false
+
+prometheus-node-exporter:
+  enabled: false
+
+kube-state-metrics:
+  enabled: true
+
+# GPU alert rules
+additionalPrometheusRulesMap:
+  gpu-alerts:
+    groups:
+      - name: gpu-alerts
+        rules:
+          - alert: GPUIdleWarning
+            expr: nvidia_smi_utilization_gpu_ratio * 100 < 20
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              description: "GPU {{ $labels.uuid }} is idle (utilization {{ $value }}%)"
+              message: "GPU 활용률 20% 미만 - 유휴 자원 감지"
+          - alert: GPUHighMemoryUsage
+            expr: nvidia_smi_memory_used_bytes / nvidia_smi_memory_total_bytes > 0.9
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              description: "GPU {{ $labels.uuid }} memory usage > 90%"
+              message: "GPU 메모리 사용률 90% 초과"
+  fake-gpu-resources:
+    groups:
+      - name: fake.gpu.resources
+        interval: 30s
+        rules:
+          - record: kube_pod_container_resource_requests
+            expr: vector(1)
+            labels:
+              resource: nvidia_com_gpu
+              namespace: ai-pass
+              pod: gpu-jupyter-0
+              container: notebook
+              node: ai-platform-k8s-worker-1
+              instance: "localhost:8443"
+              job: kube-state-metrics
+          - record: gpu_operator_gpu_nodes_total
+            expr: vector(1)
+
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false

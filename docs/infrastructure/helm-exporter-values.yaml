@@ -1,0 +1,14 @@
+# helm-exporter 배포 설정
+# 2차년도에 Prometheus가 이미 실행 중이므로 helm install 한 줄로 배포 완료
+# 배포 명령어:
+#   helm repo add speakeasyapi https://speakeasyapi.github.io/helm-exporter
+#   helm repo update
+#   helm install helm-exporter speakeasyapi/helm-exporter \
+#     --namespace monitoring \
+#     -f helm-exporter-values.yaml
+serviceMonitor:
+  enabled: true
+  # honorLabels: true → Prometheus가 helm-exporter의 원본 namespace 라벨을 유지
+  # 이 설정이 없으면 namespace가 exporter pod의 네임스페이스(monitoring)로 덮어씌워짐
+  # 수동 적용 필요 (helm-exporter 차트가 이 값을 지원하지 않을 수 있음):
+  #   kubectl apply -f helm-exporter-servicemonitor.yaml

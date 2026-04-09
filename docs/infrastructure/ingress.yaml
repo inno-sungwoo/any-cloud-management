@@ -1,0 +1,44 @@
+# Ingress 리소스 — Prometheus + ChartMuseum
+# 개발: prometheus.aipaas / chartmuseum.aipaas (/etc/hosts)
+# 운영: 도메인만 변경 (prometheus.innogrid.com 등)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prometheus-ingress
+  namespace: monitoring
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: prometheus.aipaas
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ai-pass3-prom-kube-prometh-prometheus
+                port:
+                  number: 9090
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: alertmanager-ingress
+  namespace: monitoring
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: alertmanager.aipaas
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ai-pass3-prom-kube-prometh-alertmanager
+                port:
+                  number: 9093

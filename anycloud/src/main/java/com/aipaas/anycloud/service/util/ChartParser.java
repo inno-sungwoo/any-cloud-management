@@ -7,8 +7,10 @@ import com.aipaas.anycloud.model.dto.response.ChartReleasesResponseDto;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactoryBuilder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.yaml.snakeyaml.LoaderOptions;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28,8 +30,18 @@ import java.util.stream.StreamSupport;
 @Component
 public class ChartParser {
 
-    private final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+    private final ObjectMapper yamlMapper;
     private final ObjectMapper jsonMapper = new ObjectMapper();
+
+    public ChartParser() {
+        // SnakeYAML 파싱 제한을 128MB로 확장 (대형 Helm 저장소 index.yaml 대응)
+        LoaderOptions loaderOptions = new LoaderOptions();
+        loaderOptions.setCodePointLimit(128 * 1024 * 1024);
+        YAMLFactory yamlFactory = YAMLFactory.builder()
+                .loaderOptions(loaderOptions)
+                .build();
+        this.yamlMapper = new ObjectMapper(yamlFactory);
+    }
 
     /**
      * index.yaml 내용을 파싱하여 차트 목록을 생성합니다.
@@ -214,18 +226,34 @@ public class ChartParser {
         List<ChartReleasesResponseDto.ReleaseInfo> releases = new ArrayList<>();
 
         try {
-            JsonNode rootNode = jsonMapper.readTree(output);
+            // helm 명령어의 WARNING 메시지가 JSON 앞에 출력될 수 있으므로 JSON 부분만 추출
+            String jsonContent = output;
+            int jsonStart = output.indexOf('[');
+            if (jsonStart > 0) {
+                jsonContent = output.substring(jsonStart);
+            }
+            JsonNode rootNode = jsonMapper.readTree(jsonContent);
 
             if (rootNode.isArray()) {
                 for (JsonNode releaseNode : rootNode) {
+                    String chartFull = releaseNode.path("chart").asText();
+                    // "gpu-jupyter-0.2.0" → chart="gpu-jupyter", chartVersion="0.2.0"
+                    String chartName = chartFull;
+                    String chartVersion = "";
+                    int versionIdx = chartFull.lastIndexOf('-');
+                    if (versionIdx > 0 && versionIdx < chartFull.length() - 1
+                            && Character.isDigit(chartFull.charAt(versionIdx + 1))) {
+                        chartName = chartFull.substring(0, versionIdx);
+                        chartVersion = chartFull.substring(versionIdx + 1);
+                    }
                     releases.add(ChartReleasesResponseDto.ReleaseInfo.builder()
                             .name(releaseNode.path("name").asText())
                             .namespace(releaseNode.path("namespace").asText())
                             .revision(releaseNode.path("revision").asText())
                             .updated(releaseNode.path("updated").asText())
                             .status(releaseNode.path("status").asText())
-                            .chart(releaseNode.path("chart").asText())
-                            // .appVersion(releaseNode.path("app_version").asText())
+                            .chart(chartName)
+                            .chartVersion(chartVersion)
                             .build());
                 }
             }

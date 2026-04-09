@@ -33,7 +33,7 @@ import lombok.Setter;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Table(name = "cluster", schema = "aipaas")
+@Table(name = "cluster")
 @JsonPropertyOrder({ "id", "description", "version", "api_server_url", "api_server_ip", "server_ca",
 		"client_ca", "client_key", "monit_server_url", "cluster_type", "cluster_provider", "created_at", "updated_at" })
 public class ClusterEntity implements Serializable {
@@ -80,9 +80,32 @@ public class ClusterEntity implements Serializable {
 	@Column(name = "client_token", columnDefinition = "MEDIUMTEXT")
 	private String clientToken;
 
+	@Size(max = 20)
+	@Column(name = "auth_type", length = 20)
+	@Builder.Default
+	private String authType = "token";
+
 	@Size(max = 100)
 	@Column(name = "monit_server_url",  length = 100)
 	private String monitServerUrl;
+
+	/**
+	 * 모니터링(Prometheus) 가용 상태. 1분 주기 헬스체크 결과로 갱신.
+	 * ACTIVE         — Prometheus 도달 성공
+	 * UNREACHABLE    — URL은 있으나 도달 실패 (timeout/4xx/5xx)
+	 * NOT_CONFIGURED — URL이 비어있거나 placeholder
+	 */
+	@Size(max = 20)
+	@Column(name = "monit_status", length = 20)
+	@Builder.Default
+	private String monitStatus = "NOT_CONFIGURED";
+
+	@Column(name = "monit_last_check")
+	private ZonedDateTime monitLastCheck;
+
+	@Size(max = 500)
+	@Column(name = "monit_last_error", length = 500)
+	private String monitLastError;
 
 	@Size(max = 100)
 	@Column(name = "cluster_type", nullable = false, length = 100)

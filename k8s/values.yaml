@@ -1,0 +1,40 @@
+# ai-pass-resources Helm values
+# 네임스페이스는 helm install -n <ns> 로 주입됩니다.
+
+promRelease: ai-pass-prom
+
+prometheus:
+  ingress:
+    enabled: true
+    host: prometheus-aipass.innogrid.com
+    serviceName: ai-pass-prom-kube-promethe-prometheus
+    servicePort: 9090
+
+alertmanager:
+  ingress:
+    enabled: true
+    host: alertmanager-aipass.innogrid.com
+    serviceName: ai-pass-prom-kube-promethe-alertmanager
+    servicePort: 9093
+
+nodeExporter:
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+
+gpu:
+  quota:
+    enabled: true
+    requests: "4"
+    limits: "4"
+  pricing:
+    enabled: true
+    a100PerHour: "1200"
+    v100PerHour: "800"
+    t4PerHour: "400"
+    defaultPerHour: "600"
+
+helmExporter:
+  enabled: true
+  image: sstarcher/helm-exporter:latest
+  port: 9571

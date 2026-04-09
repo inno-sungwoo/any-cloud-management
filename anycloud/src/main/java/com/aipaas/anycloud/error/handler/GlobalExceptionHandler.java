@@ -180,6 +180,6 @@ public class GlobalExceptionHandler {
     protected ResponseEntity<ErrorResponse> handleHelmDeploymentException(HelmDeploymentException e) {
         log.error("Helm deployment failed: {}", e.getMessage());
         final ErrorResponse response = ErrorResponse.of(e.getErrorCode(), e.getMessage());
-        return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+        return new ResponseEntity<>(response, HttpStatus.INTERNAL_SERVER_ERROR);
     }
 }
