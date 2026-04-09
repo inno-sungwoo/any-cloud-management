@@ -97,21 +97,36 @@ public class HelmCommandExecutor {
 
     /**
      * kubeconfig 없이 Helm 명령어를 실행합니다.
+     * stdout과 stderr를 분리하여 stdout만 반환합니다 (values.yaml 등 깨끗한 출력 보장).
      */
     public String executeHelmCommandWithoutKubeconfig(String command) throws IOException, InterruptedException {
         log.debug("Executing helm command (without kubeconfig): {}", command);
 
         ProcessBuilder processBuilder = new ProcessBuilder();
         processBuilder.command("sh", "-c", command);
-        processBuilder.redirectErrorStream(true);
+        processBuilder.redirectErrorStream(false);
 
         Process process = processBuilder.start();
 
-        StringBuilder output = new StringBuilder();
+        // stderr는 별도 스레드로 읽어 deadlock 방지
+        StringBuilder stderr = new StringBuilder();
+        Thread stderrReader = new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    stderr.append(line).append("\n");
+                }
+            } catch (IOException e) {
+                log.warn("Failed to read stderr", e);
+            }
+        });
+        stderrReader.start();
+
+        StringBuilder stdout = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
+                stdout.append(line).append("\n");
             }
         }
 
@@ -120,14 +135,22 @@ public class HelmCommandExecutor {
             process.destroyForcibly();
             throw new HelmDeploymentException("Helm command timed out: " + command);
         }
+        stderrReader.join(2000);
 
         int exitCode = process.exitValue();
-        if (exitCode != 0) {
-            throw new HelmDeploymentException(
-                    "Helm command failed with exit code " + exitCode + ": " + output.toString());
+        String stderrStr = stderr.toString();
+
+        // stderr 내용은 항상 로그로만 남기고 응답에는 포함하지 않음
+        if (!stderrStr.isEmpty()) {
+            log.debug("Helm command stderr: {}", stderrStr);
         }
 
-        return output.toString();
+        if (exitCode != 0) {
+            throw new HelmDeploymentException(
+                    "Helm command failed with exit code " + exitCode + ": " + stderrStr);
+        }
+
+        return stdout.toString();
     }
 
     /**
@@ -156,9 +179,13 @@ public class HelmCommandExecutor {
      */
     public String buildHelmRepoAddCommand(HelmRepoEntity repository) {
         StringBuilder command = new StringBuilder();
-        
+
+        // 전체 블록을 stderr로 redirect → helm show values 같은 후속 명령의 stdout 오염 방지
+        // (echo는 본질적으로 stdout이라 redirectErrorStream(false) 만으로는 못 막음)
+        command.append("{ ");
+
         // 먼저 저장소가 이미 존재하는지 확인하고, 없을 때만 추가
-        command.append("(helm repo list | grep -q '^")
+        command.append("(helm repo list 2>/dev/null | grep -q '^")
                 .append(repository.getName())
                 .append("\\s' && echo 'Repository ")
                 .append(repository.getName())
@@ -185,8 +212,8 @@ public class HelmCommandExecutor {
             log.debug("Added insecure-skip-tls-verify for repository: {}", repository.getName());
         }
         
-        // 괄호 닫기
-        command.append(")");
+        // 괄호 닫기 + 전체 블록을 stderr로 redirect
+        command.append(") ; } 1>&2");
 
         log.debug("Built helm repo add command with duplicate check for repository: {}", repository.getName());
         return command.toString();
@@ -202,12 +229,16 @@ public class HelmCommandExecutor {
 
         StringBuilder command = new StringBuilder();
         command.append(repoAddCommand).append(" && ");
-        command.append("helm install ")
+        // upgrade --install: 동일 이름 release가 있으면 업그레이드, 없으면 신규 설치 (멱등)
+        // --atomic: 실패 시 자동 rollback/uninstall (dangling release 방지)
+        // --cleanup-on-fail: 실패 시 부분 생성된 리소스 정리
+        command.append("helm upgrade --install ")
                 .append(releaseName)
                 .append(" ")
                 .append(repository.getName())
                 .append("/")
-                .append(chartName);
+                .append(chartName)
+                .append(" --atomic --cleanup-on-fail --timeout 10m");
 
         // kubeconfig 파일 지정
         command.append(" --kubeconfig ").append(kubeconfigPath);
@@ -240,9 +271,12 @@ public class HelmCommandExecutor {
         }
 
         // 배포 옵션 추가 (timeout 제거하여 호환성 확보)
-        
-        // TLS 검증 건너뛰기 (자체 서명된 인증서 또는 인증서 없는 클러스터 지원)
-        command.append(" --insecure-skip-tls-verify");
+
+        // 주의: --insecure-skip-tls-verify 는 의도적으로 제거되었습니다.
+        // 이 플래그가 OCI 레지스트리 TLS 설정에도 전파되어 auth.docker.io(Cloudflare)와의
+        // handshake를 깨뜨리는 부작용이 있습니다 (helm 3.19 기준).
+        // 클러스터 API 서버 TLS 우회가 필요하다면 kubeconfig 파일 내에서
+        // 'insecure-skip-tls-verify: true' 로 설정하세요.
 
         return command.toString();
     }
@@ -285,7 +319,7 @@ public class HelmCommandExecutor {
         }
 
         command.append(" --dry-run --debug");
-        command.append(" --insecure-skip-tls-verify");
+        // --insecure-skip-tls-verify 제거: OCI 레지스트리 TLS handshake 실패 유발
 
         return command.toString();
     }

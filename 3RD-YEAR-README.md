@@ -15,35 +15,56 @@
 
 ### 사전 요구사항
 
-- Java 17+ (OpenJDK 17)
-- Gradle 8.10
-- MariaDB (Docker: anycloud-db, port 13306)
-- Kubernetes 클러스터 (kubeconfig 설정)
-- Prometheus (http://prometheus.aipaas 또는 설정 변경)
+- **Java 21+** (OpenJDK 21 — Dockerfile은 `eclipse-temurin:21`을 사용. Spring Boot 3.2.5는 Java 17부터 가능하지만 본 프로젝트는 21로 통일)
+- Gradle 8.10 (Gradle wrapper 동봉)
+- Docker + Compose (MariaDB / ChartMuseum / 백엔드 컨테이너 구동)
+- Kubernetes 클러스터 + 정적 자격증명 kubeconfig
+- helm 3.x — 로컬 직접 실행 시에만 호스트에 필요 (Docker 컨테이너에는 Dockerfile이 helm v3.19.0을 번들로 설치)
 
-### 실행
+### 권장 실행: `./scripts/setup.sh` 한 번에 기동
 
 ```bash
-cd /Users/usermackbookpro/innogrid-prj/any-cloud-management
-git checkout feat/3rd-year-monitoring-apis
-
-export JAVA_HOME=/opt/homebrew/opt/openjdk@17
-./gradlew :anycloud:bootRun
-# → http://localhost:8888
+cd <repo>/any-cloud-management
+chmod +x scripts/setup.sh && ./scripts/setup.sh
+# → Docker Compose 빌드/기동 + Prometheus 설치 + ChartMuseum 시드 + 헬스체크
 ```
 
-### 설정
+자세한 단계와 환경 변수 설정은 [`QUICKSTART.md`](./QUICKSTART.md) 참고.
 
-`anycloud/src/main/resources/application.properties`:
-```properties
-spring.datasource.url=jdbc:mariadb://localhost:13306/aipaas
-spring.datasource.username=anycloud
-spring.datasource.password=anycloud
-server.port=8888
-server.servlet.context-path=/api/v1
+### 로컬 직접 실행 (개발/디버깅용)
+
+```bash
+cd <repo>/any-cloud-management
+
+# Docker compose 로 의존 서비스만 먼저 띄우기
+docker compose up -d anycloud-db chartmuseum
+
+# 백엔드를 로컬 JVM 으로 실행 (local profile)
+./gradlew :anycloud:bootRun --args='--spring.profiles.active=local'
+# → http://localhost:8888/api/v1
 ```
+
+### 설정 (Spring Profile 기반)
+
+설정 파일은 Spring profile 패턴으로 분리되어 있습니다:
+
+```
+anycloud/src/main/resources/
+├── application.properties           ← 공통 base (모든 키 + ${ENV:default} placeholder)
+├── application-local.properties     ← 로컬 직접 실행 override
+└── application-docker.properties    ← Docker 컨테이너 override
+```
+
+| 실행 모드 | 활성화 |
+|---|---|
+| 로컬 직접 실행 | `./gradlew :anycloud:bootRun --args='--spring.profiles.active=local'` |
+| Docker 컨테이너 | Dockerfile의 `ENV SPRING_PROFILES_ACTIVE=docker` (자동) |
+| profile 미지정 | base만 적용. `${VAR:default}` 기본값으로 동작 (로컬 친화적) |
+
+자세한 환경 변수 가이드는 [`ENVIRONMENT-SETUP.md`](./ENVIRONMENT-SETUP.md)를 참고하세요.
 
 > Prometheus URL은 DB의 `cluster` 테이블 `monit_server_url` 컬럼에서 읽어옵니다.
+> 신규 cluster 등록 시 초기값은 `MONIT_DEFAULT_URL` 환경 변수로 주입.
 > 현재: `http://prometheus.aipaas` (macOS에서는 /etc/hosts에 등록이 필요합니다)
 
 ---
@@ -158,10 +179,10 @@ server.servlet.context-path=/api/v1
 
 | 파일 | 변경 내용 |
 |------|---------|
-| `MonitServiceImpl.java` | GPU 현황 API 추가, Prometheus PromQL 쿼리 대폭 확장 (nvidia_smi 메트릭) |
+| `MonitServiceImpl.java` | GPU 현황 API 추가, Prometheus PromQL 쿼리 대폭 확장 (DCGM 메트릭) |
 | `ChartServiceImpl.java` | 비동기 배포 → 동기 배포 변경, dry-run 보안 검증 추가, 삭제 API 추가 |
 | `MonitService.java` | 인터페이스에 summary/releases/alerts/gpu-status 메서드 추가 |
-| `application.yaml` | JPA ddl-auto, Helm 경로 설정 추가 |
+| `application.yaml` | Prometheus PromQL 쿼리 템플릿 트리(`prometheus.metrics.*`) 정의. JPA/Helm 경로 같은 Spring 설정은 `application.properties` 에 있음 |
 
 ---
 
@@ -235,9 +256,12 @@ CREATE TABLE gpu_reservation (
 
 ## 9. 알려진 이슈
 
-- **Helm CLI 의존**: `HelmCommandExecutor`가 서버의 `helm` CLI를 직접 호출합니다. PATH에 helm 바이너리가 필요합니다.
-- **Prometheus DNS**: Java(Netty)는 macOS `/etc/resolver`를 무시합니다. `/etc/hosts`에 `prometheus.aipaas`를 등록해 주세요.
+- **Helm CLI 의존**: `HelmCommandExecutor`가 서버의 `helm` CLI를 자식 프로세스로 직접 호출합니다.
+  - **Docker 컨테이너**: `Dockerfile`이 helm v3.19.0을 `/usr/local/bin/helm`에 번들로 설치하므로 별도 작업 불필요.
+  - **로컬 직접 실행**: 호스트의 PATH에 helm 3.x 가 설치되어 있어야 합니다 (`brew install helm` / 공식 바이너리).
+- **Prometheus DNS**: Java(Netty)는 macOS `/etc/resolver`를 무시합니다. `/etc/hosts`에 `prometheus.aipaas` 등 사내 도메인을 직접 등록해 주세요.
 - **SnakeYAML 파싱**: bitnami 대형 차트 values.yaml 파싱 시 128MB 제한 설정이 필요합니다 (적용 완료).
+- **Bitnami OCI TLS**: bitnami 차트가 `registry-1.docker.io`로 이전되면서 사내망에서 `auth.docker.io` TLS handshake가 실패할 수 있습니다. helm `--insecure-skip-tls-verify` 플래그가 OCI 레지스트리 TLS도 깨뜨리므로 코드에서 제거되었습니다. 필요 시 ChartMuseum에 미러링하여 우회 (11-7 참조).
 
 ---
 
@@ -259,10 +283,10 @@ CREATE TABLE gpu_reservation (
 
 | 항목 | 비고 |
 |------|------|
-| Java 17+ | `JAVA_HOME` export 필요 (macOS: `/opt/homebrew/opt/openjdk@17`) |
-| Docker + docker compose | MariaDB / ChartMuseum 컨테이너 구동 |
+| **Java 21+** | 로컬 직접 실행 시에만 필요 (`./gradlew bootRun`). Docker 컨테이너는 `eclipse-temurin:21` 베이스로 자체 포함. `JAVA_HOME` export 권장 |
+| Docker + docker compose | MariaDB / ChartMuseum / 백엔드 컨테이너 구동 (setup.sh가 docker compose 사용) |
 | kubectl | 멀티클러스터의 모든 컨텍스트가 등록된 kubeconfig 필요 |
-| helm 3.x | 백엔드의 `HelmCommandExecutor`가 PATH의 `helm` 바이너리를 직접 호출 |
+| helm 3.x | **로컬 직접 실행** 시에만 호스트에 필요. Docker 컨테이너는 helm v3.19.0이 번들 설치됨 |
 | pnpm | 프론트엔드(`../ai-paas-web`) 실행용 |
 | python3 | `setup.sh`가 JSON 파싱에 사용 |
 | kubeconfig 정적 자격증명 | 각 user에 token / client-certificate-data / client-key-data 등 정적 값이 채워져 있어야 함 (exec 플러그인 인증은 지원하지 않음) |
@@ -285,22 +309,38 @@ CREATE TABLE gpu_reservation (
 | `chartmuseum` 포트 | `8880:8080` | 8880이 사용 중일 때 |
 | `anycloud-backend` 포트 | `8888:8888` | 8888이 사용 중일 때 (`application.properties`의 `server.port`도 함께 변경) |
 | `MYSQL_ROOT_PASSWORD` | `yourP@ssW0rds` | 운영 환경에선 반드시 변경 |
-| `MYSQL_USER` / `MYSQL_PASSWORD` | `anycloud` / `anycloud` | 변경 시 `application.properties`도 동기화 |
+| `MYSQL_USER` / `MYSQL_PASSWORD` | `anycloud` / `anycloud` | `docker-compose.yml`이 `${DATABASE_USERID}` / `${DATABASE_USERPASS}`로 참조하므로 `.env`에서 한 번에 변경 가능 (자동 동기화) |
 | `TZ` | `Asia/Seoul` | 다른 타임존이 필요할 때 |
 | `/etc/localtime` 마운트 | Linux 전용 | macOS에서는 제거 또는 무시 (compose가 경고만 출력) |
 
-### 11-4. `application.properties`
+### 11-4. Spring 설정 파일 (Profile 구조)
 
-| 키 | 기본값 | 환경별 설정 포인트 |
-|----|--------|-------------------|
-| `spring.datasource.url` | `jdbc:mariadb://localhost:13306/aipaas` | DB 호스트/포트가 다르거나 컨테이너 내부에서 실행할 땐 `anycloud-db:3306` 으로 변경 |
-| `spring.datasource.username/password` | `anycloud/anycloud` | docker-compose 환경 변수와 동일하게 유지 |
-| `server.port` | `8888` | 변경 시 `setup.sh`의 헬스체크 URL과 docker-compose 포트도 함께 수정 |
-| `server.servlet.context-path` | `/api/v1` | 프론트엔드 baseURL과 동기화 |
-| `kubernetes.kubeconfig.path` | `${KUBECONFIG:~/.kube/config}` | **필수**. 비어있으면 `KubernetesClientConfig`가 기동/호출 시 `IllegalStateException`을 던집니다. 다른 kubeconfig를 쓰려면 `KUBECONFIG` 환경 변수 또는 이 값을 직접 지정 |
-| `com.innogrid.rndplan.medge.monitoringUrl` | `https://localhost:9000` | Thanos 사용 시에만 의미 있음 |
+설정은 Spring profile 패턴으로 분리되어 있으며, 모든 키는 `${ENV_VAR:default}` 형태로 환경 변수 override를 지원합니다.
 
-> ⚠️ `application.properties`는 git에 포함된 파일입니다. 환경별 비밀값은 `application.properties_sample`을 참고하여 환경 변수 또는 `application-local.properties`로 분리하는 것을 권장합니다.
+| 파일 | 역할 |
+|---|---|
+| `application.properties` | 공통 base. 모든 키 정의 + 로컬 친화적 기본값 |
+| `application-local.properties` | local profile override (대부분 비어있음 — base가 이미 로컬 친화적) |
+| `application-docker.properties` | docker profile override (DB host=`anycloud-db`, kubeconfig=`/app/config/kubeconfig`, ddl-auto=`update` 등) |
+
+#### 주요 키와 환경 변수 매핑
+
+| 프로퍼티 키 | 환경 변수 | base 기본값 | docker 기본값 |
+|---|---|---|---|
+| `spring.datasource.url` | `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME` | `jdbc:mariadb://localhost:13306/aipaas` | `jdbc:mariadb://anycloud-db:3306/aipaas` |
+| `spring.datasource.username` | `DATABASE_USERID` | `anycloud` | (base 값 그대로) |
+| `spring.datasource.password` | `DATABASE_USERPASS` | `anycloud` | (base 값 그대로) |
+| `spring.jpa.hibernate.ddl-auto` | `JPA_DDL_AUTO` | `none` | `update` |
+| `server.port` | `SERVER_PORT` | `8888` | (base 값 그대로) |
+| `server.servlet.context-path` | `SERVER_CONTEXT_PATH` | `/api/v1` | (base 값 그대로) |
+| `kubernetes.kubeconfig.path` | `KUBECONFIG_PATH` | `../config/kubeconfig` | `/app/config/kubeconfig` |
+| `anycloud.monit.default-url` | `MONIT_DEFAULT_URL` | `http://localhost:9090` | `http://host.docker.internal:9090` |
+
+> 코드에서 `@Value`로 직접 읽는 키는 `kubernetes.kubeconfig.path` (`KubeconfigProvider`)와 `anycloud.monit.default-url` (`KubeConfigClusterLoader`) 두 개입니다. 나머지는 Spring Framework / springdoc / Actuator가 자동 로딩합니다.
+
+> ⚠️ 환경별 비밀값(DB 비밀번호 등)은 git에 포함된 properties 파일에 직접 쓰지 말고 **`.env` 파일이나 환경 변수로 주입**하세요. 모든 키가 `${VAR:default}` 형태이므로 그대로 동작합니다.
+
+> 📝 `application.properties_docker` 파일은 **제거되었습니다** (Spring profile 패턴으로 대체). Dockerfile은 더 이상 파일을 복사하지 않으며, `ENV SPRING_PROFILES_ACTIVE=docker`로 profile을 활성화합니다. 자세한 변경 배경은 [`ENVIRONMENT-SETUP.md`](./ENVIRONMENT-SETUP.md) 참조.
 
 ### 11-5. Kubernetes / 모니터링 설정
 
@@ -329,17 +369,125 @@ CREATE TABLE gpu_reservation (
 
 > `cluster.id`는 kubeconfig의 context 이름과 동일해야 합니다. 인증 자격증명은 DB가 아닌 kubeconfig 파일에서 직접 읽기 때문에 `client_token`/`client_ca`/`client_key`/`server_ca` 컬럼은 더 이상 런타임에 사용되지 않습니다(엔티티/CRUD에는 남아있음).
 
-### 11-7. 빠른 점검 체크리스트
+### 11-7. ChartMuseum 로컬 저장소 등록
 
+`./chartmuseum_data` 디렉토리는 `docker-compose.yml`에 정의된 `chartmuseum` 서비스가 `/charts`로 마운트하여 사용하는 로컬 차트 저장소입니다. 이 디렉토리에 `.tgz` 파일을 떨어뜨리면 ChartMuseum이 자동으로 인덱싱하여 `index.yaml`을 생성/갱신합니다.
+
+#### (1) 디렉토리 구조 예시
+
+```
+any-cloud-management/
+└── chartmuseum_data/
+    ├── ai-pipeline-0.2.0.tgz       # AI Training Pipeline Orchestrator
+    ├── drift-detector-0.2.0.tgz    # Data Drift Detection (Evidently)
+    ├── gpu-jupyter-0.2.0.tgz       # GPU 지원 Jupyter
+    ├── minio-0.2.0.tgz             # 오브젝트 스토리지
+    ├── mlflow-0.2.0.tgz            # 실험 추적
+    ├── model-server-0.2.0.tgz      # 모델 서빙
+    └── index-cache.yaml            # ChartMuseum이 자동 생성하는 인덱스 캐시 (수정 금지)
+```
+
+> 명명 규칙: `<chartName>-<version>.tgz` (helm이 `helm package`로 만든 파일명 그대로). 디렉토리 트리는 평탄(flat)해야 하며 하위 폴더는 사용하지 않습니다.
+
+#### (2) ChartMuseum 컨테이너 기동 확인
+
+`docker-compose.yml`에 이미 정의되어 있으므로 별도 작업 없이 다음으로 기동/확인합니다.
+
+```bash
+docker compose up -d chartmuseum
+docker exec chartmuseum wget -qO- http://localhost:8080/index.yaml | head -20
+# → entries 아래에 chartmuseum_data 의 .tgz 들이 나열되면 정상
+```
+
+호스트에서는 `http://localhost:8880/index.yaml` 로 동일하게 접근 가능합니다 (`8880:8080` 매핑).
+
+#### (3) 백엔드 helm_repo 테이블에 등록
+
+백엔드(`anycloud-backend`) 컨테이너에서 ChartMuseum을 호출하므로 **반드시 컨테이너 네트워크 호스트명**(`http://chartmuseum:8080`)을 사용해야 합니다. `localhost:8880`이나 `host.docker.internal`은 백엔드 컨테이너 내부에서 동작하지 않습니다.
+
+| 등록 위치 | URL |
+|---|---|
+| ✅ 백엔드 컨테이너 → ChartMuseum | `http://chartmuseum:8080` |
+| ❌ 사용 불가 | `http://localhost:8880` |
+| ❌ 사용 불가 | `http://host.docker.internal:8880` |
+
+등록 방법은 세 가지 중 택일합니다.
+
+**A. REST API (권장)**
+
+```bash
+curl -X POST 'http://localhost:8888/api/v1/helm-repos' \
+  -H 'Content-Type: application/json' \
+  --data-raw '{
+    "name": "chartmuseum-local",
+    "url": "http://chartmuseum:8080",
+    "insecureSkipTLSVerify": false
+  }'
+# 응답: "CREATED"
+```
+
+**B. 프론트엔드 UI**
+- ai-paas-web의 Helm Repository 관리 페이지에서 입력
+- Name: `chartmuseum-local` / URL: `http://chartmuseum:8080`
+
+**C. DB 직접 INSERT (시드 스크립트용)**
+
+```sql
+INSERT INTO helm_repo (id, name, url, insecure_skip_tls_verify, created_at, updated_at)
+VALUES (UUID(), 'chartmuseum-local', 'http://chartmuseum:8080', 0, NOW(), NOW())
+ON DUPLICATE KEY UPDATE url=VALUES(url), updated_at=NOW();
+```
+
+#### (4) 등록 확인
+
+```bash
+# 1) 저장소 목록 확인
+curl -s 'http://localhost:8888/api/v1/helm-repos'
+
+# 2) 백엔드를 통한 차트 목록 조회
+curl -s 'http://localhost:8888/api/v1/charts/chartmuseum-local' | python3 -m json.tool
+```
+
+#### (5) 새 차트 추가하는 방법
+
+| 방법 | 명령 |
+|---|---|
+| 파일 복사 | `cp my-chart-1.0.0.tgz ./chartmuseum_data/` |
+| ChartMuseum API 업로드 | `curl --data-binary "@my-chart-1.0.0.tgz" http://localhost:8880/api/charts` |
+| `helm cm-push` 플러그인 | `helm plugin install https://github.com/chartmuseum/helm-push`<br>`helm repo add cm-local http://localhost:8880`<br>`helm cm-push my-chart-1.0.0.tgz cm-local` |
+
+> ChartMuseum은 `ALLOW_OVERWRITE: "true"` 옵션으로 기동되므로 동일 버전 재업로드가 허용됩니다. 운영 환경에서는 false로 변경을 권장합니다.
+
+#### (6) Bitnami 등 외부 차트 미러링 (docker.io OCI 우회)
+
+Bitnami 차트가 OCI(`registry-1.docker.io`)로 이전되면서 사내망 / TLS 환경에 따라 `auth.docker.io` handshake가 실패할 수 있습니다. 자주 쓰는 차트를 ChartMuseum에 미리 미러링해 두면 외부 의존성을 제거할 수 있습니다.
+
+```bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+helm pull bitnami/nginx --version 18.x.x
+curl --data-binary "@nginx-18.x.x.tgz" http://localhost:8880/api/charts
+```
+
+이후 프론트엔드 카탈로그에서 `chartmuseum-local` 저장소를 선택해 배포하면 docker.io 의존성 없이 안정적으로 배포됩니다.
+
+---
+
+### 11-8. 빠른 점검 체크리스트
+
+#### 권장 경로 — `./scripts/setup.sh` 한 번에
+1. `kubectl config get-contexts -o name` → 사용할 컨텍스트가 모두 보이는지
+2. `./scripts/setup.sh` → 12단계 자동 기동 (DB / ChartMuseum / Prometheus / GPU / 백엔드 모두 docker compose로 띄움)
+3. 마지막에 출력되는 헬스 체크에서 8개 항목이 모두 ✓ 인지 확인
+4. Swagger UI(`http://localhost:8888/api/v1/docs`) 접속해서 API 응답 확인
+
+> ⚠️ `setup.sh` step 11(프론트엔드 자동 시작)은 현재 주석 처리되어 있습니다. 프론트는 `docker-compose.yml`의 `anycloud-frontend` 서비스로 띄우거나(`docker compose up -d anycloud-frontend`), 별도로 `cd ../ai-paas-web && pnpm dev`로 실행하세요.
+
+#### 수동 진단 — setup.sh 없이 확인할 때
 1. `kubectl config get-contexts -o name` → DB에 등록될 모든 컨텍스트 확인
-2. `./scripts/setup.sh` → DB/ChartMuseum/Prometheus/Ingress/GPU/Frontend/ Backend 설정 기동
-
-다른 환경 진입 후 아래 순서대로 확인하세요.
-
-1. `kubectl config get-contexts -o name` → DB에 등록될 모든 컨텍스트 확인
-2. `docker compose up -d anycloud-db chartmuseum` → DB/ChartMuseum 기동
-3. `docker exec anycloud-db mariadb -uanycloud -panycloud aipaas -e "SELECT id, api_server_url, monit_server_url FROM cluster;"` → context별 클러스터 레코드 확인
-4. `curl http://localhost:9090/api/v1/query?query=up` → Prometheus 도달 확인 (port-forward 또는 Ingress)
-5. `helm version` + `helm list -A` → CLI 동작 확인
-6. `./gradlew :anycloud:bootRun` → 백엔드 기동 후 `curl http://localhost:8888/api/v1/system/clusters`
+2. `docker compose up -d anycloud-db chartmuseum anycloud-backend` → 의존 서비스 + 백엔드 기동
+3. `docker exec anycloud-db mariadb -uanycloud -panycloud aipaas -e "SELECT id, api_server_url, monit_server_url FROM cluster;"` → 컨텍스트별 cluster row 자동 등록 확인
+4. `docker exec anycloud-backend ls -la /app/app.jar` → jar 빌드 시각이 최신인지 (코드 변경 후엔 `docker compose build` 필요)
+5. `curl http://localhost:9090/api/v1/query?query=up` → Prometheus 도달 확인 (port-forward 또는 Ingress)
+6. `curl http://localhost:8888/api/v1/system/clusters` → 백엔드가 cluster 목록 응답하는지
 7. Swagger (`/api/v1/docs`) 에서 모니터링/비용 API 응답 확인

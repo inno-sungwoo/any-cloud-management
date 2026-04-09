@@ -21,16 +21,23 @@
 # =============================================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-FRONTEND_DIR="$(cd "$REPO_DIR/../ai-paas-web" && pwd 2>/dev/null || echo "")"
-INFRA_DIR="$REPO_DIR/docs/infrastructure"
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+FRONTEND_DIR="$(cd "$REPO_DIR/../ai-paas-web" && pwd 2>/dev/null || echo "")"
+INFRA_DIR="$REPO_DIR/docs/infrastructure"
+LOCAL_KUBECONFIG="$REPO_DIR/config/kubeconfig"
+
+# 프로젝트 내 local kubeconfig가 있으면 우선 사용
+if [ -f "$LOCAL_KUBECONFIG" ]; then
+  export KUBECONFIG="$LOCAL_KUBECONFIG"
+  echo -e "${YELLOW}! 프로젝트 로컬 kubeconfig 사용 중: $LOCAL_KUBECONFIG${NC}"
+fi
 
 step() { echo -e "\n${BLUE}[$1/$TOTAL_STEPS]${NC} $2"; }
 ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
@@ -67,54 +74,36 @@ CTX_COUNT=$(kubectl config get-contexts -o name 2>/dev/null | wc -l)
 [ "$CTX_COUNT" -gt 0 ] || fail "kubeconfig에 등록된 컨텍스트가 없습니다"
 ok "kubeconfig 컨텍스트 ${CTX_COUNT}개 발견"
 
-kubectl get nodes >/dev/null 2>&1 || fail "현재 컨텍스트의 K8s 클러스터에 연결할 수 없습니다"
-NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
+kubectl get nodes --request-timeout='5s' >/dev/null 2>&1 || fail "현재 컨텍스트의 K8s 클러스터에 연결할 수 없습니다 (timeout 5s)"
+NODE_COUNT=$(kubectl get nodes --no-headers --request-timeout='5s' 2>/dev/null | wc -l)
 ok "현재 컨텍스트 K8s 클러스터 연결 확인 (${NODE_COUNT}노드)"
 
 # ═══════════════════════════════════════
-# 2. Docker 서비스 (MariaDB + ChartMuseum)
+# 2. Docker Compose 서비스 빌드 + 시작 (MariaDB + ChartMuseum + Backend)
 # ═══════════════════════════════════════
-step 2 "Docker 서비스 시작 (MariaDB + ChartMuseum)"
+step 2 "Docker Compose 서비스 빌드 + 시작 (db + chartmuseum + backend)"
 
 cd "$REPO_DIR"
 
-# 기존 컨테이너가 있으면 시작, 없으면 docker compose로 생성
-if docker ps --format '{{.Names}}' | grep -q '^anycloud-db$' && docker ps --format '{{.Names}}' | grep -q '^chartmuseum$'; then
-  ok "MariaDB + ChartMuseum 이미 실행 중"
+# .env 상태 안내 (docker compose 가 자동으로 .env 를 로드하므로 source 불필요)
+if [ -f .env ]; then
+  ok ".env 파일 발견 — docker compose 가 자동 로드합니다"
 else
-  # 기존 중지 컨테이너 정리 후 compose up
-  docker compose up -d anycloud-db chartmuseum 2>/dev/null || \
-  docker-compose up -d anycloud-db chartmuseum 2>/dev/null || \
-  {
-    # docker compose 실패 시 개별 컨테이너로 실행
-    warn "docker compose 실패 — 개별 컨테이너로 시작"
-
-    if ! docker ps -a --format '{{.Names}}' | grep -q '^anycloud-db$'; then
-      docker run -d --name anycloud-db \
-        -p 13306:3306 \
-        -e MYSQL_ROOT_PASSWORD=yourP@ssW0rds \
-        -e MYSQL_DATABASE=aipaas \
-        -e MYSQL_USER=anycloud \
-        -e MYSQL_PASSWORD=anycloud \
-        -v "$INFRA_DIR/db-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro" \
-        mariadb:10.11 >/dev/null
-    else
-      docker start anycloud-db 2>/dev/null || true
-    fi
-
-    if ! docker ps -a --format '{{.Names}}' | grep -q '^chartmuseum$'; then
-      docker run -d --name chartmuseum \
-        -p 8880:8080 \
-        -e STORAGE=local \
-        -e STORAGE_LOCAL_ROOTDIR=/charts \
-        -v "$REPO_DIR/chartmuseum_data:/charts" \
-        ghcr.io/helm/chartmuseum:v0.16.0 >/dev/null
-    else
-      docker start chartmuseum 2>/dev/null || true
-    fi
-  }
-  ok "Docker 서비스 시작 완료"
+  warn ".env 없음 — docker-compose.yml 의 default 값으로 동작합니다"
+  warn "운영 환경에서는 'cp .env.example .env' 후 비밀번호 변경을 권장합니다"
 fi
+
+# 포트 / 환경변수 / 볼륨 설정은 모두 docker-compose.yml에서 관리됨
+if docker compose version >/dev/null 2>&1; then
+  DC="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+  DC="docker-compose"
+else
+  fail "docker compose / docker-compose 명령을 찾을 수 없습니다"
+fi
+
+$DC up -d --build 2>&1 | tail -20 || fail "docker compose up 실패"
+ok "docker compose up 완료 (db + chartmuseum + backend)"
 
 # MariaDB 준비 대기
 echo "  MariaDB 준비 대기 중..."
@@ -136,92 +125,15 @@ done
 ok "ChartMuseum 준비 완료 (localhost:8880)"
 
 # ═══════════════════════════════════════
-# 3. DB 초기화 + 데이터 설정
+# 3. DB 초기화 (스키마 + 클러스터 자동 등록)
 # ═══════════════════════════════════════
-step 3 "DB 초기화 + 클러스터 데이터 설정"
+step 3 "DB 초기화 안내"
 
-K8S_VERSION=$(kubectl version -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['serverVersion']['gitVersion'])" 2>/dev/null || echo "unknown")
-
-# 인증은 외부 kubeconfig의 정적 자격증명만을 사용합니다.
-# (exec 플러그인 토큰 발급, DB token/cert 저장 로직은 모두 제거되었습니다)
-
-# kubeconfig의 모든 컨텍스트를 순회하여 DB cluster 테이블에 upsert.
-# 백엔드 KubernetesClientConfig가 cluster.id를 컨텍스트 이름으로 사용하므로,
-# 컨텍스트 이름 == cluster.id 매핑을 유지해야 멀티클러스터 호출이 정상 동작합니다.
-CONTEXTS=$(kubectl config get-contexts -o name 2>/dev/null || echo "")
-if [ -z "$CONTEXTS" ]; then
-  fail "kubeconfig에 등록된 컨텍스트가 없습니다"
-fi
-ok "동기화 대상 컨텍스트 ${#CONTEXTS} 개 발견"
-
-# DB 테이블 + 데이터 upsert (db-init.sql이 docker-entrypoint에서 실행되었을 수도 있음)
-docker exec -i anycloud-db mariadb -uroot -p'yourP@ssW0rds' <<SQL
-CREATE DATABASE IF NOT EXISTS aipaas DEFAULT CHARACTER SET utf8mb4;
-GRANT ALL PRIVILEGES ON aipaas.* TO 'anycloud'@'%';
-FLUSH PRIVILEGES;
-USE aipaas;
-
-CREATE TABLE IF NOT EXISTS cluster (
-  id VARCHAR(45) NOT NULL PRIMARY KEY,
-  description VARCHAR(255), status VARCHAR(45), version VARCHAR(45),
-  api_server_url VARCHAR(100) NOT NULL, api_server_ip VARCHAR(45),
-  server_ca MEDIUMTEXT, client_ca MEDIUMTEXT, client_key MEDIUMTEXT, client_token MEDIUMTEXT,
-  monit_server_url VARCHAR(100), cluster_type VARCHAR(100) NOT NULL DEFAULT '', cluster_provider VARCHAR(100) NOT NULL DEFAULT '',
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS helm_repo (
-  id VARCHAR(36) NOT NULL PRIMARY KEY,
-  name VARCHAR(100) NOT NULL, url VARCHAR(100) NOT NULL,
-  username VARCHAR(100), password VARCHAR(100), ca_file LONGTEXT,
-  insecure_skip_tls_verify TINYINT(1) NOT NULL DEFAULT 0,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS gpu_reservation (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  release_name VARCHAR(100) NOT NULL, namespace VARCHAR(100) NOT NULL DEFAULT 'default',
-  cluster_id VARCHAR(45) NOT NULL, gpu_count INT NOT NULL DEFAULT 1,
-  estimated_minutes INT NOT NULL, unit_price_krw INT NOT NULL DEFAULT 1200,
-  estimated_cost_krw INT NOT NULL DEFAULT 0, deployed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_release_cluster (release_name, cluster_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-INSERT IGNORE INTO helm_repo (id, name, url, insecure_skip_tls_verify) VALUES ('1', 'bitnami', 'https://charts.bitnami.com/bitnami', 0);
-INSERT INTO helm_repo (id, name, url, insecure_skip_tls_verify) VALUES ('4', 'chart-museum-external', 'http://localhost:8880', 0)
-ON DUPLICATE KEY UPDATE url='http://localhost:8880';
-SQL
-ok "DB 스키마/Helm 레포 초기화 완료"
-
-# 컨텍스트별 cluster 행 upsert
-SYNCED=0
-for CTX in $CONTEXTS; do
-  CTX_API=$(kubectl config view -o jsonpath="{.clusters[?(@.name==\"$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$CTX\")].context.cluster}")\")].cluster.server}" 2>/dev/null || echo "")
-  if [ -z "$CTX_API" ]; then
-    warn "컨텍스트 '$CTX' API server URL을 찾을 수 없습니다 — 스킵"
-    continue
-  fi
-  CTX_HOST=$(echo "$CTX_API" | sed -E 's|https?://||; s|:.*||')
-  # SQL injection 방지용 escaping (작은따옴표만 처리)
-  CTX_ESC=$(printf '%s' "$CTX" | sed "s/'/''/g")
-  API_ESC=$(printf '%s' "$CTX_API" | sed "s/'/''/g")
-  HOST_ESC=$(printf '%s' "$CTX_HOST" | sed "s/'/''/g")
-
-  docker exec -i anycloud-db mariadb -uroot -p'yourP@ssW0rds' aipaas <<SQL >/dev/null
-INSERT INTO cluster (id, description, status, version, api_server_url, api_server_ip, monit_server_url, cluster_type, cluster_provider)
-VALUES ('$CTX_ESC', 'kubeconfig context: $CTX_ESC', 'ACTIVE', '$K8S_VERSION', '$API_ESC', '$HOST_ESC', 'http://localhost:9090', 'k8s', 'on-premise')
-ON DUPLICATE KEY UPDATE
-  api_server_url='$API_ESC',
-  api_server_ip='$HOST_ESC',
-  monit_server_url='http://localhost:9090',
-  version='$K8S_VERSION',
-  status='ACTIVE';
-SQL
-  ok "동기화: $CTX → $CTX_API"
-  SYNCED=$((SYNCED + 1))
-done
-ok "DB 클러스터 동기화 완료 ($SYNCED 개)"
+# - 스키마: db-init.sql 이 docker-entrypoint-initdb.d 에서 컨테이너 첫 기동 시 자동 적용
+# - 클러스터 데이터: 백엔드(KubeConfigClusterLoader)가 ApplicationReadyEvent 시점에
+#   kubernetes.kubeconfig.path / KUBECONFIG 의 모든 컨텍스트를 cluster 테이블에 upsert
+ok "DB 스키마: db-init.sql(docker-entrypoint)에서 처리됨"
+ok "클러스터 데이터: 백엔드 KubeConfigClusterLoader 가 기동 시 자동 등록"
 
 # ═══════════════════════════════════════
 # 4. MLOps 샘플 차트 등록
@@ -265,195 +177,21 @@ else
 fi
 
 # ═══════════════════════════════════════
-# 7. K8s 추가 리소스 (Ingress, ServiceMonitor, GPU, helm-exporter)
+# 7. K8s 추가 리소스 (helm chart: any-cloud-management/k8s)
 # ═══════════════════════════════════════
-step 7 "K8s 추가 리소스 적용"
+step 7 "K8s 추가 리소스 helm 배포 (ai-pass-resources)"
 
-# Prometheus + AlertManager Ingress
-cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: prometheus-ingress
-  namespace: $NAMESPACE
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: prometheus-aipass.innogrid.com
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: $PROM_SVC
-                port:
-                  number: 9090
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: alertmanager-ingress
-  namespace: $NAMESPACE
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: alertmanager-aipass.innogrid.com
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: ${PROM_RELEASE}-kube-promethe-alertmanager
-                port:
-                  number: 9093
-EOF
-ok "Prometheus Ingress 적용"
+# Ingress / ServiceMonitor / GPU Quota+Pricing / helm-exporter 등은 모두
+# any-cloud-management/k8s 헬름 차트로 관리됩니다.
+RESOURCES_CHART="$REPO_DIR/k8s"
+RESOURCES_RELEASE="ai-pass-resources"
 
-# node-exporter ServiceMonitor (monitoring NS 기존 exporter 스크랩)
-cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: external-node-exporter
-  namespace: $NAMESPACE
-  labels:
-    release: $PROM_RELEASE
-spec:
-  namespaceSelector:
-    matchNames:
-      - monitoring
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: prometheus-node-exporter
-  endpoints:
-    - port: metrics
-      interval: 30s
-EOF
-ok "node-exporter ServiceMonitor 적용"
-
-# GPU ResourceQuota + Pricing
-cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: gpu-quota
-  namespace: $NAMESPACE
-spec:
-  hard:
-    requests.nvidia.com/gpu: "4"
-    limits.nvidia.com/gpu: "4"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: gpu-pricing
-  namespace: $NAMESPACE
-data:
-  A100_KRW_PER_HOUR: "1200"
-  V100_KRW_PER_HOUR: "800"
-  T4_KRW_PER_HOUR: "400"
-  DEFAULT_KRW_PER_HOUR: "600"
-EOF
-ok "GPU ResourceQuota + 가격 ConfigMap 적용"
-
-# helm-exporter
-if kubectl get deploy -n "$NAMESPACE" helm-exporter >/dev/null 2>&1; then
-  ok "helm-exporter 이미 설치됨"
-else
-  cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: helm-exporter
-  namespace: $NAMESPACE
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: helm-exporter-${NAMESPACE}
-rules:
-  - apiGroups: [""]
-    resources: ["secrets", "namespaces"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: helm-exporter-${NAMESPACE}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: helm-exporter-${NAMESPACE}
-subjects:
-  - kind: ServiceAccount
-    name: helm-exporter
-    namespace: $NAMESPACE
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: helm-exporter
-  namespace: $NAMESPACE
-  labels:
-    app.kubernetes.io/name: helm-exporter
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: helm-exporter
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: helm-exporter
-    spec:
-      serviceAccountName: helm-exporter
-      containers:
-        - name: helm-exporter
-          image: sstarcher/helm-exporter:latest
-          ports:
-            - containerPort: 9571
-              name: http
-          args: ["-namespaces="]
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: helm-exporter
-  namespace: $NAMESPACE
-  labels:
-    app.kubernetes.io/name: helm-exporter
-spec:
-  selector:
-    app.kubernetes.io/name: helm-exporter
-  ports:
-    - port: 9571
-      targetPort: 9571
-      name: http
----
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: helm-exporter
-  namespace: $NAMESPACE
-  labels:
-    release: $PROM_RELEASE
-spec:
-  endpoints:
-  - interval: 30s
-    port: http
-    honorLabels: true
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: helm-exporter
-EOF
-  ok "helm-exporter 설치 완료"
-fi
+helm upgrade --install "$RESOURCES_RELEASE" "$RESOURCES_CHART" \
+  --namespace "$NAMESPACE" \
+  --create-namespace \
+  --set promRelease="$PROM_RELEASE" \
+  --wait --timeout 3m
+ok "ai-pass-resources 차트 배포 완료 (Ingress / ServiceMonitor / GPU / helm-exporter)"
 
 # ═══════════════════════════════════════
 # 8. Prometheus Pod 준비 대기
@@ -474,7 +212,7 @@ step 9 "Prometheus port-forward (localhost:9090)"
 pkill -f "port-forward.*${PROM_SVC}" 2>/dev/null || true
 sleep 1
 
-kubectl port-forward -n "$NAMESPACE" "svc/${PROM_SVC}" 9090:9090 >/dev/null 2>&1 &
+kubectl port-forward --address 0.0.0.0 -n "$NAMESPACE" "svc/${PROM_SVC}" 9090:9090 >/dev/null 2>&1 &
 PF_PID=$!
 echo "  port-forward PID: $PF_PID"
 
@@ -488,68 +226,62 @@ for i in $(seq 1 10); do
 done
 
 # ═══════════════════════════════════════
-# 10. 백엔드 빌드 + 시작
+# 10. 백엔드 헬스 체크 (이미 step 2에서 docker compose로 실행됨)
 # ═══════════════════════════════════════
-step 10 "백엔드 빌드 + 시작"
+step 10 "백엔드 헬스 체크 (anycloud-backend 컨테이너)"
 
-cd "$REPO_DIR"
-
-# 기존 백엔드 프로세스 정리
+# 기존 로컬 gradle bootRun 프로세스가 떠 있다면 정리 (도커로 통합되었음)
 pkill -f "anycloud:bootRun" 2>/dev/null || true
-sleep 1
 
-echo "  Gradle 빌드 중..."
-./gradlew :anycloud:classes -q 2>/dev/null && ok "빌드 성공" || fail "빌드 실패"
-
-echo "  백엔드 시작 중..."
-./gradlew :anycloud:bootRun > /tmp/anycloud-backend.log 2>&1 &
-BACKEND_PID=$!
-echo "  백엔드 PID: $BACKEND_PID (로그: /tmp/anycloud-backend.log)"
-
-for i in $(seq 1 30); do
-  if curl -s http://localhost:8888/api/v1/system/clusters 2>/dev/null | grep -q "innogrid"; then
-    ok "백엔드 시작 완료 (localhost:8888)"
+echo "  백엔드 컨테이너 준비 대기 중... (로그: docker logs -f anycloud-backend)"
+for i in $(seq 1 5); do
+  if curl -s -o /dev/null -w "%{http_code}" http://localhost:8888/api/v1/system/clusters 2>/dev/null | grep -q "200"; then
+    ok "백엔드 준비 완료 (localhost:8888)"
     break
   fi
-  if [ "$i" = "30" ]; then
-    warn "백엔드 시작 대기 시간 초과 (로그 확인: tail -f /tmp/anycloud-backend.log)"
+  if [ "$i" = "60" ]; then
+    warn "백엔드 준비 대기 시간 초과 (로그 확인: docker logs -f anycloud-backend)"
   fi
   sleep 2
 done
 
 # ═══════════════════════════════════════
-# 11. 프론트엔드 시작
+# (구) step 10-1 의 monit_server_url UPDATE 는 제거됨.
+# 이제 KubeConfigClusterLoader 가 INSERT 시점에 application.properties 의
+# anycloud.monit.default-url (docker 환경에서는 MONIT_DEFAULT_URL env) 값으로 자동 채움.
+# ═══════════════════════════════════════
+
 # ═══════════════════════════════════════
 step 11 "프론트엔드 시작"
 
-if [ -n "$FRONTEND_DIR" ] && [ -d "$FRONTEND_DIR" ]; then
-  cd "$FRONTEND_DIR"
+# if [ -n "$FRONTEND_DIR" ] && [ -d "$FRONTEND_DIR" ]; then
+#   cd "$FRONTEND_DIR"
 
-  # 기존 프론트엔드 프로세스 정리
-  pkill -f "vite" 2>/dev/null || true
-  sleep 1
+#   # 기존 프론트엔드 프로세스 정리
+#   pkill -f "vite" 2>/dev/null || true
+#   sleep 1
 
-  if ! command -v pnpm >/dev/null 2>&1; then
-    warn "pnpm이 설치되어 있지 않습니다. npm install -g pnpm 으로 설치 후 수동 실행:"
-    echo "  cd $FRONTEND_DIR && pnpm install && pnpm dev"
-  else
-    pnpm install --frozen-lockfile 2>/dev/null || pnpm install
-    pnpm dev > /tmp/anycloud-frontend.log 2>&1 &
-    FRONTEND_PID=$!
-    echo "  프론트엔드 PID: $FRONTEND_PID (로그: /tmp/anycloud-frontend.log)"
+#   if ! command -v pnpm >/dev/null 2>&1; then
+#     warn "pnpm이 설치되어 있지 않습니다. npm install -g pnpm 으로 설치 후 수동 실행:"
+#     echo "  cd $FRONTEND_DIR && pnpm install && pnpm dev"
+#   else
+#     pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+#     pnpm dev > /tmp/anycloud-frontend.log 2>&1 &
+#     FRONTEND_PID=$!
+#     echo "  프론트엔드 PID: $FRONTEND_PID (로그: /tmp/anycloud-frontend.log)"
 
-    for i in $(seq 1 15); do
-      if curl -s -o /dev/null -w "%{http_code}" http://localhost:5173 2>/dev/null | grep -q "200"; then
-        ok "프론트엔드 시작 완료 (localhost:5173)"
-        break
-      fi
-      sleep 1
-    done
-  fi
-else
-  warn "프론트엔드 디렉토리를 찾을 수 없습니다: $REPO_DIR/../ai-paas-web"
-  echo "  수동 실행: cd <ai-paas-web> && pnpm install && pnpm dev"
-fi
+#     for i in $(seq 1 15); do
+#       if curl -s -o /dev/null -w "%{http_code}" http://localhost:5173 2>/dev/null | grep -q "200"; then
+#         ok "프론트엔드 시작 완료 (localhost:5173)"
+#         break
+#       fi
+#       sleep 1
+#     done
+#   fi
+# else
+#   warn "프론트엔드 디렉토리를 찾을 수 없습니다: $REPO_DIR/../ai-paas-web"
+#   echo "  수동 실행: cd <ai-paas-web> && pnpm install && pnpm dev"
+# fi
 
 # ═══════════════════════════════════════
 # 12. 헬스 체크
@@ -596,5 +328,5 @@ echo -e "    백엔드   : tail -f /tmp/anycloud-backend.log"
 echo -e "    프론트엔드: tail -f /tmp/anycloud-frontend.log"
 echo ""
 echo -e "  ${YELLOW}종료하려면${NC}:"
-echo -e "    kill $BACKEND_PID ${FRONTEND_PID:-} $PF_PID  # 백엔드 + 프론트엔드 + port-forward"
+echo -e "    kill ${BACKEND_PID:-} ${FRONTEND_PID:-} $PF_PID  # 백엔드 + 프론트엔드 + port-forward"
 echo -e "    docker compose down                   # MariaDB + ChartMuseum"

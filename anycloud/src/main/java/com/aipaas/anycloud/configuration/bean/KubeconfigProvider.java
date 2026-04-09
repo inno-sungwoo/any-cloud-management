@@ -5,9 +5,23 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
- * Resolves the kubeconfig file path from application properties or environment variable.
+ * Resolves the kubeconfig file path from Spring property {@code kubernetes.kubeconfig.path}.
  *
- * Priority: KUBECONFIG env var > application.properties > null (fallback to DB-based generation)
+ * <p>Path source:
+ * <ol>
+ *   <li>{@code kubernetes.kubeconfig.path} Spring property
+ *       (typically backed by {@code KUBECONFIG_PATH} env var via {@code ${KUBECONFIG_PATH:../config/kubeconfig}} placeholder)</li>
+ *   <li>If empty/null → returns null (caller falls back to legacy DB-based kubeconfig generation)</li>
+ * </ol>
+ *
+ * <p><b>Note on the standard {@code KUBECONFIG} environment variable:</b><br>
+ * This class does NOT read the standard {@code KUBECONFIG} env var directly.
+ * The {@code KUBECONFIG} env var is only set <em>downstream</em> by
+ * {@link com.aipaas.anycloud.service.util.HelmCommandExecutor} when spawning
+ * the helm CLI child process — the helm binary follows that env var natively.
+ * If you want the host's {@code KUBECONFIG} to take effect, set
+ * {@code KUBECONFIG_PATH} to the same value or override
+ * {@code kubernetes.kubeconfig.path} in application properties.
  */
 @Component
 @Slf4j
